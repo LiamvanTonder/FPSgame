@@ -34,6 +34,8 @@ struct RaidStats {
     double duration = 0.0;
     std::string causeOfDeath, killedBy;
     int botsKilled = 0, botExtracts = 0, botSendBacks = 0, botLoots = 0, botRespawns = 0, botWeaponsTaken = 0;
+    int botFlanks = 0, botPushes = 0, botWithdrawals = 0, botShots = 0, botCoveredShots = 0, botHealsHidden = 0, botBodyWatches = 0;
+    int botGearSwaps = 0, botAttachmentsFitted = 0, botUpstairs = 0, botLootZone = 0;
 };
 
 struct FeedLine {
@@ -67,7 +69,7 @@ public:
     bool pickUp(Character& c, int worldItem);
     void dropFromCharacter(Character& c, ItemPtr item);
 
-    int spawnBot(int tier);
+    int spawnBot(int tier, float quality = 0.0f);
     SimContext context();
     void message(const std::string& s);
     std::vector<FeedLine>& feed() { return m_feed; }

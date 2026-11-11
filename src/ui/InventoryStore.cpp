@@ -2,6 +2,7 @@
 #include "ui/InventoryUi.h"
 
 #include "game/Character.h"
+#include "game/Attachments.h"
 #include "game/WeaponDefs.h"
 #include "items/Profile.h"
 #include "render/Hud.h"
@@ -64,7 +65,26 @@ std::string offerInfo(const ItemDef& d) {
                               "destroyed limbs"};
         return std::string("treats ") + what[int(d.med)];
     }
-    case ItemCat::Optic: return d.optic == 1 ? "1x red dot" : "magnified scope";
+    case ItemCat::Optic: {
+        const OpticDef& o = opticDefs()[d.optic];
+        std::snprintf(buf, sizeof(buf), "%s  %s rail", o.type == OpticType::RedDot ? "1x dot" : o.minMag < o.maxMag ? "variable scope" : "magnified",
+                      o.mount <= 1 ? "any" : o.mount == 2 ? "short" : "long");
+        return buf;
+    }
+    case ItemCat::Attachment: {
+        const AttachmentDef& a = attachmentDefs()[d.attach];
+        std::string s = std::string(attachSlotName(a.slot)) + "  " + attachSpecialName(a.special);
+        if (a.slot == AS_Muzzle) s += std::string("  ") + threadName(a.mount);
+        if (a.slot == AS_Stock) s += std::string("  ") + stockMountName(a.mount);
+        if (a.loudnessDb != 0.0f) {
+            std::snprintf(buf, sizeof(buf), "  %+.0f dB", a.loudnessDb);
+            s += buf;
+        }
+        return s;
+    }
+    case ItemCat::Armor: case ItemCat::Helmet:
+        std::snprintf(buf, sizeof(buf), "class %d  %.0f condition  %.1f kg", d.armorClass, d.durability, d.mass);
+        return buf;
     default:
         std::snprintf(buf, sizeof(buf), "%d x %d storage", d.gridW, d.gridH);
         return buf;
@@ -106,7 +126,7 @@ void InventoryUi::drawStore(Hud& hud, Context& ctx, const UiInput& in, float x, 
 
     // Your guns: click one to see exactly what feeds it.
     std::vector<int> guns = arsenal(ctx.player->equip, ctx.panel == Panel::Store ? ctx.grid : nullptr);
-    hud.text(x, yy, "Your guns (click to filter ammo, magazines and optics):", kDim, 1.3f * s);
+    hud.text(x, yy, "Your guns (click to filter ammo, magazines, optics and attachments):", kDim, 1.3f * s);
     yy += 18 * s;
     float cx = x;
     if (m_filterWeapon >= 0 && std::find(guns.begin(), guns.end(), m_filterWeapon) == guns.end()) m_filterWeapon = -1;
@@ -154,7 +174,7 @@ void InventoryUi::drawStore(Hud& hud, Context& ctx, const UiInput& in, float x, 
 
     // Offers
     std::vector<StoreOffer> offers = store::offers(m_tab);
-    if (m_filterWeapon >= 0 && (m_tab == StoreTab::Ammo || m_tab == StoreTab::Magazines || m_tab == StoreTab::Optics)) {
+    if (m_filterWeapon >= 0 && (m_tab == StoreTab::Ammo || m_tab == StoreTab::Magazines || m_tab == StoreTab::Optics || m_tab == StoreTab::Attachments)) {
         offers.erase(std::remove_if(offers.begin(), offers.end(),
                                     [&](const StoreOffer& o) { return !store::fits(itemDefs()[o.def], m_filterWeapon); }),
                      offers.end());
@@ -174,7 +194,7 @@ void InventoryUi::drawStore(Hud& hud, Context& ctx, const UiInput& in, float x, 
         hud.text(x + 6 * s, ry + 3 * s, d.name + (owned ? "   (owned)" : ""), kText, 1.4f * s);
         // Which of your guns this feeds, in green.
         std::string fitsLine;
-        if (d.cat == ItemCat::Ammo || d.cat == ItemCat::Magazine || d.cat == ItemCat::Optic)
+        if (d.cat == ItemCat::Ammo || d.cat == ItemCat::Magazine || d.cat == ItemCat::Optic || d.cat == ItemCat::Attachment)
             for (int g : guns)
                 if (store::fits(d, g)) fitsLine += (fitsLine.empty() ? "fits: " : ", ") + shortGunName(g);
         hud.text(x + 6 * s, ry + 18 * s, offerInfo(d), kDim, 1.15f * s);

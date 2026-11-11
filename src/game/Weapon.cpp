@@ -95,17 +95,37 @@ Item* Weapon::item() const {
 
 const WeaponDef& Weapon::def() const {
     Item* it = item();
-    return it ? weaponDefs()[it->d().weapon] : fallbackDef();
+    return it ? it->weaponDef() : fallbackDef();
 }
 
-const OpticDef& Weapon::optic() const {
+int Weapon::activeOptic() const {
     Item* it = item();
-    return opticDefs()[it ? it->optic : 0];
+    if (!it) return 0;
+    if (it->altSight) {
+        const WeaponDef& d = def();
+        if (d.offsetSight) return kOpticOffsetDot;
+        if (d.magnifier && it->optic > 0 && opticDefs()[it->optic].type == OpticType::RedDot)
+            return it->optic == 6 ? kOpticHoloMagnified : kOpticDotMagnified;
+    }
+    return it->optic;
 }
+
+const OpticDef& Weapon::optic() const { return opticDefs()[activeOptic()]; }
 
 float Weapon::magnification() const {
     Item* it = item();
-    return it ? it->magnification : 1.0f;
+    if (!it) return 1.0f;
+    return activeOptic() == it->optic ? it->magnification : optic().minMag;
+}
+
+bool Weapon::lightOn() const {
+    Item* it = item();
+    return it && it->lightOn && (def().light & 1) && !isSwitching() && m_lowerBlend < 0.5f;
+}
+
+bool Weapon::laserOn() const {
+    Item* it = item();
+    return it && it->lightOn && (def().light & 2) && !isSwitching() && m_lowerBlend < 0.5f;
 }
 
 float Weapon::zeroRange() const {
@@ -184,6 +204,7 @@ const char* Weapon::fireModeName() const {
 
 float Weapon::sightHeight() const {
     const OpticDef& o = optic();
+    if (activeOptic() == kOpticOffsetDot) return glm::length(glm::vec2(def().offsetPoint));
     return o.type == OpticType::Iron ? def().ironSightHeight : def().railTopY + o.axisAboveRail;
 }
 
@@ -191,6 +212,12 @@ glm::vec3 Weapon::sightEyeLocal() const {
     const WeaponDef& d = def();
     const OpticDef& o = optic();
     float h = sightHeight();
+    // The offset dot sits 45 degrees round the bore; the gun is rolled over to bring it up.
+    if (activeOptic() == kOpticOffsetDot) {
+        glm::vec3 main{0.0f, opticDefs()[item()->optic].type == OpticType::Iron ? d.ironSightHeight : d.railTopY + opticDefs()[item()->optic].axisAboveRail, d.ironEyeZ};
+        glm::vec3 off{d.offsetPoint.x, d.offsetPoint.y, d.ironEyeZ};
+        return glm::mix(main, off, smooth(m_altBlend));
+    }
     if (o.type == OpticType::Magnified) return {0.0f, h, d.railZ + o.length * 0.5f + o.eyeRelief};
     return {0.0f, h, d.ironEyeZ}; // irons and red dots: normal cheek weld / arm extension
 }
@@ -222,6 +249,7 @@ OpticView Weapon::opticView(float alpha) const {
     float z = o.type == OpticType::Magnified ? d.railZ + o.length * 0.5f : d.railZ;
     v.axis = q;
     v.ocular = pivot + q * glm::vec3(0.0f, h, z);
+    if (activeOptic() == kOpticOffsetDot) v.ocular = pivot + q * d.offsetPoint;
     v.ocularRadius = o.ocularRadius;
     v.eyeRelief = o.eyeRelief;
     v.magnification = magnification();
@@ -274,6 +302,7 @@ void Weapon::computeTargetPose(const WeaponContext& ctx, const World& world, flo
 
     // Aimed: weapon placed so the sight line (or optic axis) passes through the eye and the aim point.
     glm::quat adsQ = lookRotation(aim - ctx.eye) * cant;
+    if (m_altBlend > 0.0f) adsQ = adsQ * glm::angleAxis(0.7854f * smooth(m_altBlend), glm::vec3(0, 0, 1)); // rolled onto the offset dot
     glm::vec3 adsAnchor = ctx.eye - adsQ * sightEyeLocal();
 
     float s = smooth(m_adsBlend);
@@ -291,6 +320,10 @@ void Weapon::computeTargetPose(const WeaponContext& ctx, const World& world, flo
         float breathAmp = glm::mix(0.006f, 0.0018f, s) * (1.0f + 3.0f * m_exertion);
         float tremorAmp = glm::mix(0.0025f, 0.0007f, s) * (1.0f + 1.5f * m_exertion) * (1.0f + 0.6f * ctx.moveSpeed);
         tremorAmp *= d.swayScale;
+        if (m_bipod) {
+            tremorAmp *= d.heavyBipod ? 0.08f : 0.12f;
+            breathAmp *= 0.15f;
+        }
         tremorAmp += m_armShake * 0.08f;
         if (m_holdingBreath) {
             breathAmp *= 0.05f;
@@ -361,6 +394,44 @@ void Weapon::computeTargetPose(const WeaponContext& ctx, const World& world, flo
     }
 }
 
+void Weapon::updateBipod(const WeaponContext& ctx, const World& world, float dt) {
+    const WeaponDef& d = def();
+    if (!hasWeapon() || !d.bipod || ctx.sprinting || isSwitching() || m_reloadBlend > 0.5f) {
+        m_bipod = false;
+        m_bipodTimer = 0.0f;
+        return;
+    }
+    if (m_bipod) {
+        // Folds when the shooter moves off the rest or swings beyond the legs' arc.
+        glm::vec3 legs = toWorld(d.bipodPoint);
+        float dyaw = std::abs(std::remainder(ctx.yaw - m_bipodYaw, 2.0f * float(M_PI)));
+        if (glm::length(glm::vec2(legs.x - m_bipodAt.x, legs.z - m_bipodAt.z)) > 0.18f || dyaw > 0.45f || ctx.moveSpeed > 0.6f)
+            m_bipod = false;
+        return;
+    }
+    // Deploys when the legs find something to stand on: a sill, a crate, the ground when prone.
+    if (ctx.moveSpeed > 0.4f || m_adsBlend < 0.3f) {
+        m_bipodTimer = 0.0f;
+        return;
+    }
+    glm::vec3 legs = toWorld(d.bipodPoint);
+    glm::vec3 top = toWorld(glm::vec3(d.bipodPoint.x, d.underPoint.y, d.bipodPoint.z));
+    WorldHit hit;
+    SegmentQuery q;
+    q.ignoreOwner = m_owner;
+    q.skipPenetrable = true;
+    if (world.segment(top, legs - glm::vec3(0.0f, 0.06f, 0.0f), hit, q)) {
+        m_bipodTimer += dt;
+        if (m_bipodTimer > 0.4f) {
+            m_bipod = true;
+            m_bipodAt = hit.point;
+            m_bipodYaw = ctx.yaw;
+        }
+    } else {
+        m_bipodTimer = 0.0f;
+    }
+}
+
 void Weapon::applyBodyMotion(const WeaponContext& ctx) {
     glm::quat yawQ = glm::angleAxis(ctx.yaw, glm::vec3(0, 1, 0));
     float aimDamp = glm::mix(1.0f, 0.45f, smooth(m_adsBlend));
@@ -389,6 +460,7 @@ void Weapon::updateDrift(const WeaponContext& ctx, float dt) {
     if (ctx.supportArmGone && !d.oneHanded) amplitude *= 3.0f;
     if (ctx.crouching) amplitude *= 0.7f;
     if (m_holdingBreath) amplitude *= 0.4f;
+    if (m_bipod) amplitude *= d.heavyBipod ? 0.06f : 0.10f;
     float tau = glm::mix(1.2f, 2.0f, s);
 
     std::normal_distribution<float> n(0.0f, 1.0f);
@@ -403,6 +475,7 @@ void Weapon::event(std::vector<WeaponEvent>& events, WeaponEvent::Type type, con
     e.owner = m_owner;
     e.weapon = item() ? item()->d().weapon : 0;
     e.suppressed = d.suppressed;
+    e.loudness = d.loudness;
     events.push_back(e);
 }
 
@@ -467,6 +540,7 @@ void Weapon::fire(const World& world, Ballistics& ballistics, std::vector<Impact
     float hip = glm::mix(1.35f, 1.0f, s);
     float energyScale = std::sqrt(std::max(0.3f, (bp.mass * bp.muzzleVelocity) / (d.projectile.mass * d.projectile.muzzleVelocity)));
     hip *= energyScale;
+    if (m_bipod) hip *= d.heavyBipod ? 0.25f : 0.32f; // the legs take the recoil into the support
     arm.addAngularVelocity(arm.orientation * glm::vec3(d.recoilRise * hip, u11(m_rng) * d.recoilYaw * hip, u11(m_rng) * 0.2f));
     arm.addLinearVelocity(arm.orientation * glm::vec3(0.0f, 0.04f, d.recoilBack));
 
@@ -477,6 +551,7 @@ void Weapon::fire(const World& world, Ballistics& ballistics, std::vector<Impact
     shot.owner = m_owner;
     shot.weapon = it->d().weapon;
     shot.suppressed = d.suppressed;
+    shot.loudness = d.loudness;
     events.push_back(shot);
 
     if (d.reload == ReloadType::SingleLoad) {
@@ -729,6 +804,12 @@ void Weapon::update(const WeaponInput& in, const WeaponContext& ctx, float dt, c
 
     if (it) {
         if (in.toggleFireMode && d.canAuto) it->fullAuto = !it->fullAuto;
+        if (in.toggleLight && d.light) it->lightOn = !it->lightOn;
+        if (in.toggleSight) {
+            bool canAlt = d.offsetSight || (d.magnifier && it->optic > 0 && opticDefs()[it->optic].type == OpticType::RedDot);
+            it->altSight = canAlt && !it->altSight;
+            rezero();
+        }
         if (in.zoomSteps != 0.0f && optic().maxMag > optic().minMag)
             it->magnification = std::clamp(it->magnification * std::pow(1.15f, in.zoomSteps), optic().minMag, optic().maxMag);
         if (in.zeroSteps != 0) {
@@ -758,7 +839,23 @@ void Weapon::update(const WeaponInput& in, const WeaponContext& ctx, float dt, c
     m_holdingBreath = canHold;
     m_breathHeld = m_holdingBreath ? m_breathHeld + dt : std::max(0.0f, m_breathHeld - dt * 0.6f);
 
+    {
+        bool offset = it && it->altSight && d.offsetSight;
+        float before = m_altBlend;
+        m_altBlend = approach(m_altBlend, offset ? 1.0f : 0.0f, dt / 0.25f);
+        if (before != m_altBlend && (m_altBlend == 0.0f || m_altBlend == 1.0f)) rezero();
+    }
+    updateBipod(ctx, world, dt);
     updateDrift(ctx, dt);
+    if (it && it->lightOn && d.light) {
+        // Where the beam lands: the first solid thing along the emitter's axis.
+        glm::vec3 a = toWorld(d.lightPoint), dir = pointing();
+        WorldHit hit;
+        SegmentQuery q;
+        q.ignoreOwner = m_owner;
+        m_beamHit = world.segment(a, a + dir * 60.0f, hit, q);
+        m_beamEnd = m_beamHit ? hit.point : a + dir * 60.0f;
+    }
 
     // Drive the weapon toward where the shooter wants it.
     glm::vec3 anchor;
@@ -769,6 +866,15 @@ void Weapon::update(const WeaponInput& in, const WeaponContext& ctx, float dt, c
     p = lerpParams(p, kReloadArm, smooth(m_reloadBlend));
     p.maxAngularSpeed *= d.armSpeedScale * ctx.armSpeed;
     p.maxAngularAccel *= d.armAccelScale * ctx.armSpeed;
+    // A drum or a long magazine full of rounds is extra weight below the receiver.
+    if (it && it->mag && d.inertia > 0.0f) {
+        float extra = (float(it->mag->rounds.size()) - float(d.magazine) * 0.6f) * 0.012f + (it->mag->d().capacity > d.magazine * 1.4f ? 0.25f : 0.0f);
+        if (extra > 0.0f) {
+            float k = d.inertia / (d.inertia + extra * d.chamber.z * d.chamber.z);
+            p.maxAngularAccel *= k;
+            p.maxAngularSpeed *= std::sqrt(k);
+        }
+    }
     if (ctx.supportArmGone && !d.oneHanded) {
         p.maxAngularAccel *= 0.5f;
         p.positionStiffness *= 0.5f;
@@ -845,8 +951,7 @@ void drawParts(Renderer& r, const WeaponDef& d, const OpticDef& o, const glm::ma
 
 void drawWeaponItem(Renderer& r, const Item& item, const glm::mat4& base) {
     if (item.d().cat != ItemCat::Weapon) return;
-    const WeaponDef& d = weaponDefs()[item.d().weapon];
-    drawParts(r, d, opticDefs()[item.optic], base, 0.0f, 0.0f, 0.0f, false, -1, glm::vec3(0.0f));
+    drawParts(r, item.weaponDef(), opticDefs()[item.optic], base, 0.0f, 0.0f, 0.0f, false, -1, glm::vec3(0.0f));
 }
 
 void Weapon::draw(Renderer& r, float alpha) const {
@@ -875,7 +980,7 @@ void Weapon::draw(Renderer& r, float alpha) const {
     }
 
     r.setWeaponLayer(m_firstPerson);
-    drawParts(r, d, optic(), base, action, load.boltLift, load.boltTravel, true, rightHandPart, load.hand);
+    drawParts(r, d, opticDefs()[item()->optic], base, action, load.boltLift, load.boltTravel, true, rightHandPart, load.hand);
 
     if (load.showCartridge) {
         glm::mat4 m = glm::translate(base, load.cartridge);
@@ -891,6 +996,30 @@ void Weapon::draw(Renderer& r, float alpha) const {
         glm::vec3 leftHand = pivot + q * leftLocal;
         r.draw(r.box, segmentMatrix(rightHand, rightHand + yawQ * d.rightElbowFromHand, d.forearmThickness), kSleeve);
         r.draw(r.box, segmentMatrix(leftHand, leftHand + yawQ * d.leftElbowFromHand, d.forearmThickness), kSleeve);
+    }
+
+    if (lightOn() || laserOn()) {
+        glm::vec3 a = pivot + q * d.lightPoint, fwd = q * glm::vec3(0, 0, -1);
+        if (lightOn()) {
+            float reach = std::min(30.0f, glm::length(m_beamEnd - a) + 1.5f);
+            r.addSpot(a + fwd * 0.05f, fwd, reach);
+            glm::mat4 m = glm::mat4_cast(q);
+            m[3] = glm::vec4(a + fwd * 0.01f, 1.0f);
+            r.draw(r.sphere, glm::scale(m, glm::vec3(0.025f)), glm::vec3(1.0f, 0.95f, 0.8f), Pattern::Glow, glm::vec4(0, 0, 0, 2.0f), false);
+        }
+        if (laserOn()) {
+            glm::vec3 e = m_beamEnd;
+            float len = glm::length(e - a);
+            if (len > 0.05f) {
+                r.draw(r.box, segmentMatrix(a, e, 0.0015f), glm::vec3(1.0f, 0.1f, 0.05f), Pattern::Glow, glm::vec4(0, 0, 0, 0.35f), false);
+                if (m_beamHit) {
+                    glm::mat4 m(1.0f);
+                    m[3] = glm::vec4(e - fwd * 0.01f, 1.0f);
+                    r.draw(r.sphere, glm::scale(m, glm::vec3(0.012f + 0.0006f * len)), glm::vec3(1.0f, 0.12f, 0.06f), Pattern::Glow,
+                           glm::vec4(0, 0, 0, 3.0f), false);
+                }
+            }
+        }
     }
 
     if (m_flashTimer > 0.0f) {

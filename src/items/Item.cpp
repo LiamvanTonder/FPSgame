@@ -1,8 +1,10 @@
 #include "items/Item.h"
 
+#include "game/Attachments.h"
 #include "game/WeaponDefs.h"
 
 #include <algorithm>
+#include <cmath>
 #include <istream>
 #include <ostream>
 #include <string>
@@ -27,6 +29,11 @@ ItemPtr Item::clone() const {
     c->fullAuto = fullAuto;
     c->uses = uses;
     c->pool = pool;
+    for (int i = 0; i < kAttachSlots; ++i) c->att[i] = att[i];
+    c->folded = folded;
+    c->lightOn = lightOn;
+    c->altSight = altSight;
+    c->condition = condition;
     if (grid) c->grid = std::make_unique<Grid>(grid->clone());
     return c;
 }
@@ -41,7 +48,14 @@ int Item::totalValue() const {
         int o = opticItemDef(optic);
         if (o >= 0) v += itemDefs()[o].value;
     }
+    for (int a : att)
+        if (a >= 0) {
+            int ad = attachmentItemDef(a);
+            if (ad >= 0) v += itemDefs()[ad].value;
+        }
     if (dd.cat == ItemCat::Med && dd.uses > 1) v = v * uses / dd.uses;
+    if ((dd.cat == ItemCat::Armor || dd.cat == ItemCat::Helmet) && dd.durability > 0.0f)
+        v = int(v * (0.25f + 0.75f * std::clamp(condition / dd.durability, 0.0f, 1.0f)));
     if (grid)
         for (const Grid::Entry& e : grid->items) v += e.item->totalValue();
     return v;
@@ -57,6 +71,8 @@ std::string Item::label() const {
         if (dd.uses > 1) return dd.shortName + "\n" + std::to_string(uses) + "x";
         return dd.shortName;
     case ItemCat::Weapon: return dd.shortName + "\n" + std::to_string(loadedRounds(*this)) + "/" + std::to_string(loadedCapacity(*this));
+    case ItemCat::Armor: case ItemCat::Helmet:
+        return dd.shortName + "\n" + std::to_string(int(std::round(100.0f * condition / std::max(1.0f, dd.durability)))) + "%";
     default: return dd.shortName;
     }
 }
@@ -69,6 +85,7 @@ ItemPtr makeItem(int def, int count) {
     it->count = d.cat == ItemCat::Ammo ? (count < 0 ? d.stack : std::min(count, d.stack)) : 1;
     it->uses = d.uses;
     it->pool = d.hpPool;
+    it->condition = d.durability;
     if (d.cat == ItemCat::Rig || d.cat == ItemCat::Backpack) it->grid = std::make_unique<Grid>(d.gridW, d.gridH);
     if (d.cat == ItemCat::Weapon) {
         const WeaponDef& w = weaponDefs()[d.weapon];
@@ -101,7 +118,7 @@ ItemPtr makeLoadedWeapon(int weapon, int optic, int ammoDef) {
     ItemPtr w = makeItem(weaponItemDef(weapon));
     const WeaponDef& wd = weaponDefs()[weapon];
     if (ammoDef < 0) ammoDef = defaultAmmo(wd.caliber);
-    w->optic = std::min(optic, wd.maxOptic);
+    w->optic = opticFits(wd, optic) ? optic : 0;
     w->magnification = opticDefs()[w->optic].minMag;
     switch (wd.reload) {
     case ReloadType::Magazine: {
@@ -227,7 +244,7 @@ Grid Grid::clone() const {
 // ---------------------------------------------------------------- Equipment
 
 const char* equipSlotName(int slot) {
-    static const char* names[kEquipSlots] = {"Primary", "Secondary", "Back", "Back", "Rig", "Backpack"};
+    static const char* names[kEquipSlots] = {"Primary", "Secondary", "Back", "Back", "Rig", "Backpack", "Armour", "Helmet"};
     return slot >= 0 && slot < kEquipSlots ? names[slot] : "?";
 }
 
@@ -237,13 +254,15 @@ bool Equipment::accepts(int slot, const Item& it) const {
     case ES_Hand0: case ES_Hand1: case ES_Back0: case ES_Back1: return c == ItemCat::Weapon;
     case ES_Rig: return c == ItemCat::Rig;
     case ES_Backpack: return c == ItemCat::Backpack;
+    case ES_Armor: return c == ItemCat::Armor;
+    case ES_Helmet: return c == ItemCat::Helmet;
     }
     return false;
 }
 
 bool Equipment::stowable(const Item& it) {
     ItemCat c = it.d().cat;
-    return c != ItemCat::Weapon && c != ItemCat::Rig && c != ItemCat::Backpack;
+    return c != ItemCat::Weapon && c != ItemCat::Rig && c != ItemCat::Backpack && c != ItemCat::Armor && c != ItemCat::Helmet;
 }
 
 std::vector<Grid*> Equipment::grids() {
@@ -411,6 +430,16 @@ void writeItem(std::ostream& out, const Item& it) {
     } else {
         out << " N";
     }
+    // Optional fields (older saves simply end here).
+    int n = 0;
+    for (int a : it.att) n += a >= 0 ? 1 : 0;
+    if (n > 0) {
+        out << " A " << n;
+        for (int s = 0; s < kAttachSlots; ++s)
+            if (it.att[s] >= 0) out << ' ' << s << ' ' << attachmentDefs()[it.att[s]].id;
+    }
+    if (it.folded) out << " F";
+    if (it.d().durability > 0.0f) out << " D " << it.condition;
     out << " }";
 }
 
@@ -440,9 +469,33 @@ ItemPtr readItem(std::istream& in) {
         it->grid = std::make_unique<Grid>();
         if (!readGrid(in, *it->grid)) return nullptr;
     }
-    in >> tok; // "}"
+    bool hadCondition = false;
+    while (in >> tok && tok != "}") {
+        if (tok == "A") {
+            int n = 0;
+            in >> n;
+            for (int i = 0; i < n; ++i) {
+                int s = -1;
+                std::string id;
+                in >> s >> id;
+                int a = findAttachment(id);
+                if (s >= 0 && s < kAttachSlots && a >= 0) it->att[s] = a;
+            }
+        } else if (tok == "F") {
+            it->folded = true;
+        } else if (tok == "D") {
+            in >> it->condition;
+            hadCondition = true;
+        }
+    }
     if (it->def < 0) return nullptr; // unknown item (removed from the game): dropped
-    if (it->d().cat == ItemCat::Weapon) it->optic = std::clamp(it->optic, 0, weaponDefs()[it->d().weapon].maxOptic);
+    if (!hadCondition) it->condition = it->d().durability;
+    if (it->d().cat == ItemCat::Weapon) {
+        const WeaponDef& wd = weaponDefs()[it->d().weapon];
+        if (!opticFits(wd, it->optic)) it->optic = 0;
+        for (int s = 0; s < kAttachSlots; ++s)
+            if (it->att[s] >= 0 && (attachmentSlot(it->att[s]) != s || !attachmentFits(wd, it->att[s]))) it->att[s] = -1;
+    }
     return it;
 }
 

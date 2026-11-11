@@ -146,19 +146,19 @@ void Health::damageZone(int z, float dmg, int shooter, const char* cause) {
     checkDeath(shooter, cause);
 }
 
-HitOutcome Health::applyHit(int bodyPart, float energyJ, const AmmoDef& ammo, int shooter, std::mt19937& rng) {
+HitOutcome Health::applyHit(int bodyPart, float energyJ, const AmmoDef& ammo, int shooter, std::mt19937& rng, bool blunt) {
     HitOutcome out;
     if (m_dead) return out;
     int z = zoneOfPart(bodyPart);
     float k = std::max(energyJ, 0.0f) / 1000.0f;
-    float dmg = 45.0f * std::pow(k, 0.6f) * kZoneMul[z] * ammo.damage;
+    float dmg = 45.0f * std::pow(k, 0.6f) * kZoneMul[z] * (blunt ? 1.0f : ammo.damage);
     out.damage = dmg;
     bool wasDestroyed = m_zones[z].destroyed();
     damageZone(z, dmg, shooter, z == Z_Head ? "head shot" : "gunshot wound");
     ZoneState& s = m_zones[z];
     out.destroyed = !wasDestroyed && s.destroyed();
 
-    float bleedMul = ammo.bleed * (z == Z_Thorax || z == Z_Stomach ? 1.3f : 1.0f);
+    float bleedMul = blunt ? 0.0f : ammo.bleed * (z == Z_Thorax || z == Z_Stomach ? 1.3f : 1.0f);
     if (!s.heavyBleed && u01(rng) < (0.10f + 0.15f * k) * bleedMul) {
         s.heavyBleed = true;
         out.newHeavyBleed = true;

@@ -89,6 +89,7 @@ void Simulation::setupRaid(unsigned seed, int botCount, Equipment& loadout, bool
     builder.build(seed, world, terrain, map, terrainColors);
     loot.spawnContainers(map, world, map.blocks, rng);
     nav.build(world, map.halfSize);
+    nav.addLevels(world, map);
 
     addCharacter(true);
     Character& p = player();
@@ -100,13 +101,13 @@ void Simulation::setupRaid(unsigned seed, int botCount, Equipment& loadout, bool
     }
     botTarget = botCount;
     for (int i = 0; i < botCount; ++i) {
-        float r = u01(rng);
-        spawnBot(r < 0.4f ? 0 : r < 0.75f ? 1 : r < 0.93f ? 2 : 3);
+        BotKitRoll k = rollBotTier(rng);
+        spawnBot(k.tier, k.quality);
     }
     stats.botRespawns = 0;
 }
 
-int Simulation::spawnBot(int tier) {
+int Simulation::spawnBot(int tier, float quality) {
     int slot = -1;
     for (int i = 1; i < int(chars.size()); ++i)
         if (!chars[i]->active) {
@@ -142,7 +143,7 @@ int Simulation::spawnBot(int tier) {
     }
     c.name = kCallsigns[(slot * 7 + int(u01(rng) * 25)) % 25];
     c.tier = tier;
-    makeLoadout(c.equip, tier, rng);
+    makeLoadout(c.equip, tier, rng, quality);
     c.spawn(world, pos, yaw);
     bots.add(slot, unsigned(rng()), time);
     m_interact[slot] = InteractState{};
@@ -453,7 +454,7 @@ void Simulation::handleEvents() {
         switch (e.type) {
         case WeaponEvent::Shot:
             s.type = SoundType::Shot;
-            s.db = weaponDefs()[e.weapon].loudness;
+            s.db = e.loudness;
             s.variant = e.weapon;
             s.suppressed = e.suppressed;
             if (e.owner >= 0 && e.owner < int(chars.size())) chars[e.owner]->lastShot = e.suppressed ? chars[e.owner]->lastShot : time;
@@ -550,6 +551,7 @@ void Simulation::handleImpacts() {
             } else if (wasAlive) {
                 bots.onDamaged(c.owner, imp.shooter, from, *this);
             }
+            if (wasAlive) bots.onHitLanded(imp.shooter, c.owner, *this);
             if (imp.shooter == 0 && c.owner != 0) {
                 lastHitReport = desc;
                 lastHitTimer = 6.0f;
@@ -578,8 +580,8 @@ void Simulation::updateRespawns(float dt) {
     }
     for (size_t i = 0; i < m_respawnAt.size();) {
         if (time >= m_respawnAt[i]) {
-            float r = u01(rng);
-            if (spawnBot(r < 0.4f ? 0 : r < 0.75f ? 1 : r < 0.93f ? 2 : 3) >= 0) {
+            BotKitRoll k = rollBotTier(rng);
+            if (spawnBot(k.tier, k.quality) >= 0) {
                 ++stats.botRespawns;
                 message("A new raider entered the area");
             }
@@ -677,6 +679,7 @@ void Simulation::tick(float dt, const CharacterInput& playerIn, bool interactHel
         std::string how = c.causeOfDeath;
         if (c.killer >= 0 && c.killer < int(chars.size()) && c.killer != int(i)) {
             chars[c.killer]->kills++;
+            if (Bot* kb = bots.find(c.killer)) kb->myKills.push_back(int(i));
             message(killer + " killed " + c.name + " (" + how + ")");
         } else {
             message(c.name + " died (" + how + ")");

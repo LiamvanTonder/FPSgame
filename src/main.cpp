@@ -1,8 +1,9 @@
-﻿#include "ai/NavGrid.h"
+#include "ai/NavGrid.h"
 #include "audio/Audio.h"
 #include "core/Paths.h"
 #include "core/Window.h"
 #include "game/ArmModel.h"
+#include "game/Attachments.h"
 #include "game/Ballistics.h"
 #include "game/Game.h"
 #include "game/Health.h"
@@ -133,7 +134,7 @@ void inventoryTest() {
     check(magazineFits(itemDefs()[findItemDef("m_stanag_30")], findWeapon("shade300")), "STANAG fits the .300 BLK rifle");
     check(!magazineFits(itemDefs()[findItemDef("m_545_30")], kRifle), "5.45 magazine does not fit the 5.56 carbine");
     std::printf("  catalogue: %zu weapons, %zu item kinds, %zu loads of ammunition\n", weaponDefs().size(), itemDefs().size(), ammoDefs().size());
-    check(weaponDefs().size() >= 50, "50+ weapons");
+    check(weaponDefs().size() >= 60, "60+ weapons");
 }
 
 void saveTest() {
@@ -494,9 +495,9 @@ void raidTest() {
                     ++stuck;
                     std::printf("  stuck: %s (%s) at %.1f %.1f %.1f\n", c->name.c_str(), g.c_str(), c->position.x, c->position.y, c->position.z);
                     if (Bot* b = sim.bots.find(c->id)) {
-                        glm::vec2 wp = b->pathIndex < b->path.size() ? b->path[b->pathIndex] : glm::vec2(-1);
-                        std::printf("    [%s] path %zu/%zu next %.1f %.1f dest %.1f %.1f walkable %d move %.2f %.2f speed %.2f grounded %d action %d loot %d/%d\n",
-                                    b->debug.c_str(), b->pathIndex, b->path.size(), wp.x, wp.y, b->destination.x, b->destination.y,
+                        glm::vec3 wp = b->pathIndex < b->path.size() ? b->path[b->pathIndex] : glm::vec3(-1);
+                        std::printf("    [%s] path %zu/%zu next %.1f %.1f %.1f dest %.1f %.1f walkable %d move %.2f %.2f speed %.2f grounded %d action %d loot %d/%d\n",
+                                    b->debug.c_str(), b->pathIndex, b->path.size(), wp.x, wp.y, wp.z, b->destination.x, b->destination.z,
                                     int(sim.nav.walkable({c->position.x, c->position.z})), b->input.move.x, b->input.move.y,
                                     c->horizontalSpeed(), int(c->grounded), int(c->action()), b->lootType, b->lootIndex);
                         AABB box{c->position - glm::vec3(0.7f, 0.0f, 0.7f), c->position + glm::vec3(0.7f, 1.8f, 0.7f)};
@@ -523,12 +524,116 @@ void raidTest() {
     std::string goals;
     for (const std::string& g : goalsSeen) goals += g + " ";
     std::printf("  behaviours seen: %s\n", goals.c_str());
+    int armorStops = 0;
+    for (auto& c : sim.chars) armorStops += c->armorStops;
+    std::printf("  tactics: %d flanks, %d pushes, %d withdrawals; %d of %d shots from cover; %d heals out of sight; %d bodies watched first\n",
+                s.botFlanks, s.botPushes, s.botWithdrawals, s.botCoveredShots, s.botShots, s.botHealsHidden, s.botBodyWatches);
+    std::printf("  gear: %d swaps, %d attachments fitted; %d armour stops (living raiders); %d bot-quarter-seconds upstairs; %d loot-zone visits\n",
+                s.botGearSwaps, s.botAttachmentsFitted, armorStops, s.botUpstairs, s.botLootZone);
+    check(s.botShots == 0 || s.botCoveredShots * 2 > s.botShots, "most bot shots come from cover");
+    check(s.botLootZone > 0, "bots visit the loot zone");
     check(s.botsKilled > 0, "bots found and killed each other");
     check(s.botLoots > 0 && s.botWeaponsTaken > 0, "bots looted and took weapons");
     check(s.botExtracts + s.botSendBacks > 0, "bots extracted or sent loot home");
     check(s.botRespawns > 0, "replacements spawned");
     check(stuck <= 2, "no bot stuck for over a minute (2 allowed)");
     check(t < 900.0, "runs faster than real time");
+}
+
+// Two raiders meet in the open with some crates about: they should get behind them, not stand
+// and trade shots in the field.
+void duelTest() {
+    std::printf("[Field duel]\n");
+    Simulation sim;
+    Equipment none;
+    sim.setupRaid(1234u, 0, none, false);
+    // Find a clear patch of open ground.
+    glm::vec3 q(0.0f);
+    bool found = false;
+    std::vector<int> ov;
+    for (int i = 0; i < 400 && !found; ++i) {
+        float x = -300.0f + float(i % 20) * 30.0f, z = -300.0f + float(i / 20) * 30.0f;
+        float h = sim.terrain.height(x, z);
+        AABB box{glm::vec3(x - 40.0f, h - 3.0f, z - 22.0f), glm::vec3(x + 40.0f, h + 8.0f, z + 22.0f)};
+        sim.world.overlap(box, ov);
+        bool clear = true;
+        for (int ci : ov) {
+            const Collider& c = sim.world.collider(ci);
+            if (!c.terrain && c.owner == kOwnerWorld) clear = false;
+        }
+        float h2 = sim.terrain.height(x - 25.0f, z), h3 = sim.terrain.height(x + 25.0f, z);
+        if (clear && std::abs(h2 - h3) < 3.0f) {
+            q = glm::vec3(x, h, z);
+            found = true;
+        }
+    }
+    check(found, "an open field for the duel");
+    if (!found) return;
+    glm::vec3 A = q + glm::vec3(-25.0f, 0, 0), B = q + glm::vec3(25.0f, 0, 0);
+    auto crate = [&](glm::vec3 c, glm::vec3 half) {
+        c.y = sim.terrain.height(c.x, c.z);
+        Collider col;
+        col.box = OBB::fromCenterSize(c + glm::vec3(0, half.y - 0.3f, 0), half * 2.0f);
+        col.surface = Surface::Wood;
+        sim.world.add(col);
+    };
+    for (const glm::vec3& base : {A, B}) {
+        float s = base.x < q.x ? 1.0f : -1.0f;
+        crate(base + glm::vec3(s * 8.0f, 0, 9.0f), glm::vec3(0.5f, 0.8f, 1.3f));
+        crate(base + glm::vec3(s * 10.0f, 0, -8.0f), glm::vec3(0.5f, 0.8f, 1.3f));
+        crate(base + glm::vec3(-s * 6.0f, 0, 11.0f), glm::vec3(1.3f, 0.8f, 0.5f));
+    }
+    sim.nav.build(sim.world, sim.map.halfSize);
+    sim.nav.addLevels(sim.world, sim.map);
+    int ids[2];
+    for (int k = 0; k < 2; ++k) {
+        ids[k] = sim.spawnBot(1, 0.0f);
+        Character& c = *sim.chars[ids[k]];
+        c.equip.clear();
+        c.equip.slots[ES_Rig] = makeItem("rig_assault");
+        c.equip.slots[ES_Hand0] = makeLoadedWeapon(kRifle);
+        std::mt19937 r(3);
+        addAmmoFor(*c.equip.slots[ES_Rig]->grid, kRifle, 3, 0, r);
+        ItemPtr band = makeItem("med_bandage");
+        c.equip.stow(band);
+        glm::vec3 p = k == 0 ? A : B;
+        p.y = sim.terrain.height(p.x, p.z) + 0.05f;
+        c.spawn(sim.world, p, k == 0 ? -1.5708f : 1.5708f); // facing each other
+        Bot* b = sim.bots.find(ids[k]);
+        b->aggression = 0.5f;
+        b->caution = 0.5f;
+        b->skill = 0.5f;
+    }
+    sim.stats = RaidStats{};
+    double cover[2] = {-1.0, -1.0}, seen[2] = {-1.0, -1.0};
+    CharacterInput idle;
+    const float dt = 1.0f / 240.0f;
+    for (int i = 0; i < 240 * 30; ++i) {
+        sim.tick(dt, idle, false);
+        for (int k = 0; k < 2; ++k) {
+            Bot* b = sim.bots.find(ids[k]);
+            Character& c = *sim.chars[ids[k]];
+            if (!b || !c.alive() || cover[k] >= 0.0) continue;
+            if (seen[k] < 0.0)
+                for (const Contact& x : b->contacts)
+                    if (x.id == ids[1 - k] && x.visible) seen[k] = sim.time;
+            if (seen[k] < 0.0) continue;
+            if (b->hasCover && glm::length(b->cover - glm::vec2(c.position.x, c.position.z)) < 1.3f) cover[k] = sim.time;
+        }
+    }
+    float worst = 0.0f;
+    for (int k = 0; k < 2; ++k)
+        if (Bot* b = sim.bots.find(ids[k])) worst = std::max(worst, b->maxExposed);
+    const RaidStats& s = sim.stats;
+    std::printf("  first saw the other at %.1f s / %.1f s\n", seen[0], seen[1]);
+    std::printf("  reached cover after %.1f s / %.1f s; %d of %d shots from cover; longest exposed %.1f s; flanks %d, pushes %d, withdrawals %d\n",
+                cover[0], cover[1], s.botCoveredShots, s.botShots, worst, s.botFlanks, s.botPushes, s.botWithdrawals);
+    bool quick = seen[0] >= 0.0 || seen[1] >= 0.0;
+    for (int k = 0; k < 2; ++k)
+        if (seen[k] >= 0.0 && !(cover[k] >= 0.0 && cover[k] - seen[k] < 6.0)) quick = false;
+    check(quick, "whoever sees the other takes cover within 6 s");
+    check(s.botShots == 0 || s.botCoveredShots > s.botShots * 0.6, "over 60 % of shots fired from cover");
+    check(worst < 4.0f, "nobody stands exposed for more than 4 s at a time");
 }
 
 void playerFlowTest() {
@@ -591,20 +696,97 @@ void entranceTest() {
             for (int i = 0; i < 240 * 6 && !reached; ++i) {
                 sim.tick(dt, in, false);
                 glm::vec3 d = e.inside - p.position;
-                reached = std::sqrt(d.x * d.x + d.z * d.z) < 0.6f;
+                bool level = std::abs(d.y) < 0.6f; // stairs: got up there
+                reached = std::sqrt(d.x * d.x + d.z * d.z) < 0.6f && level;
                 // Past it is fine too (walked straight through).
-                if (glm::dot(p.position - e.inside, to) > 0.0f) reached = true;
+                if (glm::dot(p.position - e.inside, to) > 0.0f && level) reached = true;
             }
             if (!reached) {
                 ++failed;
-                if (failed <= 6)
-                    std::printf("  blocked: seed %u door at %.1f %.1f (stopped at %.1f %.1f)\n", seed, (e.outside.x + e.inside.x) * 0.5f,
-                                (e.outside.z + e.inside.z) * 0.5f, p.position.x, p.position.z);
+                if (failed <= 6) {
+                    std::printf("  blocked: seed %u from %.1f %.1f %.1f to %.1f %.1f %.1f (stopped at %.1f %.1f %.1f)\n", seed, e.outside.x, e.outside.y,
+                                e.outside.z, e.inside.x, e.inside.y, e.inside.z, p.position.x, p.position.y, p.position.z);
+                    AABB box{p.position + glm::vec3(-0.6f, 0.05f, -0.6f), p.position + glm::vec3(0.6f, 1.8f, 0.6f)};
+                    std::vector<int> ov;
+                    sim.world.overlap(box, ov);
+                    for (int ci : ov) {
+                        const Collider& c = sim.world.collider(ci);
+                        if (!c.blocksPlayer || c.terrain) continue;
+                        AABB b = c.box.bounds();
+                        std::printf("    near [%.2f %.2f %.2f]-[%.2f %.2f %.2f]\n", b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+                    }
+                }
             }
         }
     }
     std::printf("  %d of %d building entrances walkable over 3 maps\n", total - failed, total);
     check(total > 60 && failed == 0, "every door can be walked through");
+}
+
+void levelsTest() {
+    std::printf("[Upper floors & loot zone]\n");
+    std::vector<std::string> zones;
+    int floors = 0, reachedAll = 0, floorsTried = 0;
+    for (unsigned seed : {1234u, 77u, 4242u, 9u, 31337u, 555u}) {
+        MapData map;
+        World world;
+        Terrain terrain;
+        std::vector<glm::vec3> colors;
+        MapBuilder().build(seed, world, terrain, map, colors);
+        world.setTerrain(&terrain);
+        if (std::find(zones.begin(), zones.end(), map.lootZone.name) == zones.end()) zones.push_back(map.lootZone.name);
+        if (seed != 1234u && seed != 77u) continue;
+        NavGrid nav;
+        nav.build(world, map.halfSize);
+        nav.addLevels(world, map);
+        floors += int(map.floors.size());
+        // From a spawn point to the middle of every upper level.
+        for (const NavFloor& f : map.floors) {
+            ++floorsTried;
+            glm::vec3 goal(0.0f);
+            bool found = false;
+            // A walkable point on that floor near its middle.
+            for (float fx : {0.5f, 0.3f, 0.7f, 0.2f, 0.8f})
+                for (float fz : {0.5f, 0.3f, 0.7f, 0.2f, 0.8f}) {
+                    glm::vec3 q(f.min.x + (f.max.x - f.min.x) * fx, f.y, f.min.y + (f.max.y - f.min.y) * fz);
+                    if (!found && nav.walkable3(q)) {
+                        goal = q;
+                        found = true;
+                    }
+                }
+            std::vector<glm::vec3> path;
+            const SpawnPoint& s = map.spawns[floorsTried % map.spawns.size()];
+            if (found && nav.findPath3(s.position, goal, path) && !path.empty() && std::abs(path.back().y - f.y) < 0.3f) ++reachedAll;
+            else std::printf("  no path to the level at %.1f %.1f (y %.1f)%s\n", (f.min.x + f.max.x) * 0.5f, (f.min.y + f.max.y) * 0.5f, f.y, found ? "" : " - nothing walkable");
+        }
+    }
+    std::printf("  %d upper levels on 2 maps, %d/%d reachable; loot zones seen:", floors, reachedAll, floorsTried);
+    for (const std::string& z : zones) std::printf(" %s;", z.c_str());
+    std::printf("\n");
+    check(floors >= 16 && reachedAll == floorsTried, "every upper floor, walkway and roof is reachable by stairs");
+    check(zones.size() >= 3, "the loot zone moves between areas from raid to raid");
+
+    // Loot-zone containers carry more.
+    std::mt19937 rng(5);
+    double plain = 0.0, zone = 0.0;
+    int dear = 0;
+    const ContainerType kinds[] = {ContainerType::WeaponCrate, ContainerType::Duffel, ContainerType::AmmoBox, ContainerType::Toolbox};
+    for (int i = 0; i < 2000; ++i) {
+        LootContainer a, b;
+        a.type = b.type = kinds[i % 4];
+        a.tier = 0;
+        b.tier = 1;
+        b.lootZone = true;
+        fillContainer(a, rng);
+        fillContainer(b, rng);
+        for (auto& e : a.grid.items) plain += e.item->totalValue();
+        for (auto& e : b.grid.items) {
+            zone += e.item->totalValue();
+            if (e.item->d().cat == ItemCat::Weapon && weaponDefs()[e.item->d().weapon].value >= 14000) ++dear;
+        }
+    }
+    std::printf("  mean container value: ordinary %.0f cr, loot zone %.0f cr; 14k+ guns in 2000 zone containers: %d\n", plain / 2000, zone / 2000, dear);
+    check(zone > plain * 2.0 && dear > 0 && dear < 60, "loot zone: clearly better, the dearest guns still rare");
 }
 
 void rarityTest() {
@@ -658,6 +840,181 @@ void storeTest() {
     check(!store::buy(p, expensive, msg), "can't buy without the credits");
 }
 
+void botKitTest() {
+    std::printf("[Raider kits]\n");
+    std::mt19937 rng(11);
+    int count[4] = {};
+    for (int i = 0; i < 10000; ++i) ++count[rollBotTier(rng).tier];
+    std::printf("  tiers: %.1f%% %.1f%% %.1f%% %.1f%%\n", count[0] / 100.0, count[1] / 100.0, count[2] / 100.0, count[3] / 100.0);
+    check(std::abs(count[0] - 3500) < 200 && std::abs(count[1] - 4000) < 200 && std::abs(count[2] - 1500) < 200 && std::abs(count[3] - 1000) < 200,
+          "35 / 40 / 15 / 10 split");
+    double mean[4] = {};
+    bool pistolOnly = true, dearRare = true;
+    int dear = 0;
+    for (int t = 0; t < 4; ++t) {
+        for (int i = 0; i < 400; ++i) {
+            Equipment eq;
+            BotKitRoll k{t, t == 3 ? float(i % 20) / 19.0f * float(i % 20) / 19.0f : 0.0f};
+            makeLoadout(eq, t, rng, k.quality);
+            mean[t] += eq.totalValue() / 400.0;
+            if (t == 0)
+                for (int s : {ES_Hand0, ES_Hand1, ES_Back0, ES_Back1})
+                    if (eq.slots[s] && weaponDefs()[eq.slots[s]->d().weapon].cls != WeaponClass::Pistol) pistolOnly = false;
+            if (t == 3 && eq.slots[ES_Hand0] && weaponDefs()[eq.slots[ES_Hand0]->d().weapon].value >= 14000) ++dear;
+        }
+    }
+    dearRare = dear < 400 / 4;
+    std::printf("  mean kit value: %.0f / %.0f / %.0f / %.0f cr, tier-3 kits with a 14k+ gun: %d / 400\n", mean[0], mean[1], mean[2], mean[3], dear);
+    check(pistolOnly, "barebones raiders carry only a pistol");
+    check(mean[0] < mean[1] && mean[1] < mean[2] && mean[2] < mean[3], "kit value rises with tier");
+    check(dearRare, "the dearest guns stay rare even in the best kits");
+}
+
+void armorTest() {
+    std::printf("[Armour]\n");
+    auto def = [](const char* id) { return itemDefs()[findItemDef(id)]; };
+    auto energy = [](const char* ammo, float v) {
+        const AmmoDef& a = ammoDefs()[findAmmo(ammo)];
+        return 0.5f * a.mass * v * v;
+    };
+    const AmmoDef &nine = ammoDefs()[findAmmo("9_fmj")], &x39 = ammoDefs()[findAmmo("762x39_fmj")], &m855 = ammoDefs()[findAmmo("556_fmj")],
+                  &ap = ammoDefs()[findAmmo("556_ap")];
+    ItemDef soft = def("arm_soft"), heavy = def("arm_heavy"), assault = def("arm_assault");
+    float e9 = energy("9_fmj", 360.0f), e39 = energy("762x39_fmj", 715.0f), e556 = energy("556_fmj", 910.0f), eap = energy("556_ap", 880.0f);
+    check(armorStopsBullet(soft, soft.durability, nine, e9) && !armorStopsBullet(soft, soft.durability, x39, e39), "class 1 stops 9 mm but not 7.62x39");
+    check(armorStopsBullet(heavy, heavy.durability, m855, e556) && armorStopsBullet(heavy, heavy.durability, ap, eap), "class 4 stops 5.56 FMJ and AP");
+    check(armorStopsBullet(assault, assault.durability, m855, e556) && !armorStopsBullet(assault, assault.durability * 0.1f, m855, e556),
+          "worn-out class 3 lets 5.56 through");
+    check(!armorStopsBullet(assault, assault.durability, ap, eap), "5.56 AP defeats class 3");
+}
+
+void attachmentTest() {
+    std::printf("[Attachments]\n");
+    const auto& atts = attachmentDefs();
+    std::printf("  %d attachments, %d optics\n", int(atts.size()), int(opticDefs().size()));
+    check(atts.size() >= 44, "44+ attachments");
+    const WeaponDef& rifle = weaponDefs()[kRifle];
+    int supp = findAttachment("sup_r556"), multi = findAttachment("sup_r30"), brake = findAttachment("brk_r556");
+    check(supp >= 0 && attachmentFits(rifle, supp), "5.56 suppressor fits the carbine");
+    check(!attachmentFits(weaponDefs()[findWeapon("talon308")], supp), "...but not a .308 thread");
+    WeaponDef blk = rifle;
+    blk.caliber = Cal_300BLK;
+    blk.bulletDiameter = 0.0078f;
+    check(!attachmentFits(blk, supp) && attachmentFits(blk, multi), "a 5.56 bore can't take .300 BLK; the 30-cal can can");
+    check(!attachmentFits(weaponDefs()[kPistol], findAttachment("vg")) && attachmentFits(weaponDefs()[kPistol], findAttachment("pl_light")),
+          "pistols take pistol lights, not foregrips");
+    check(opticFits(weaponDefs()[kPistol], 1) && !opticFits(weaponDefs()[kPistol], 4) && opticFits(rifle, 8), "optic rails: dot on a pistol, LPVO on a carbine, no 8x on a pistol");
+
+    // Suppressor: quieter, longer muzzle, slower to swing.
+    ItemPtr plain = makeLoadedWeapon(kRifle), can = makeLoadedWeapon(kRifle);
+    can->att[AS_Muzzle] = supp;
+    const WeaponDef &a = plain->weaponDef(), &b = can->weaponDef();
+    std::printf("  suppressed: %.0f -> %.0f dB, muzzle %.2f -> %.2f m, mass %.2f -> %.2f kg, arm accel x%.2f\n", a.loudness, b.loudness,
+                -a.muzzle.z, -b.muzzle.z, a.mass, b.mass, b.armAccelScale / a.armAccelScale);
+    check(b.suppressed && a.loudness - b.loudness > 20.0f && b.muzzle.z < a.muzzle.z - 0.15f && b.armAccelScale < a.armAccelScale,
+          "suppressor: quieter, longer, slower to swing");
+
+    World world = groundWorld();
+    auto fireOnce = [&](ItemPtr gun, float& riseDeg, float& db) {
+        Equipment eq;
+        eq.slots[ES_Hand0] = std::move(gun);
+        Weapon w;
+        WeaponContext ctx;
+        ctx.eye = glm::vec3(0, 1.66f, 0);
+        ctx.aimPoint = glm::vec3(0, 1.66f, -100.0f);
+        w.init(ctx, &eq, 0, true);
+        WeaponInput in;
+        in.adsHeld = true;
+        Ballistics bl;
+        std::vector<Impact> imp;
+        std::vector<WeaponEvent> ev;
+        for (int i = 0; i < 240; ++i) w.update(in, ctx, 1.0f / 240.0f, world, bl, imp, ev);
+        float p0 = std::asin(w.pointing().y), peak = 0.0f;
+        in.firePressed = true;
+        for (int i = 0; i < 72; ++i) {
+            w.update(in, ctx, 1.0f / 240.0f, world, bl, imp, ev);
+            in.firePressed = false;
+            peak = std::max(peak, std::asin(w.pointing().y) - p0);
+        }
+        riseDeg = glm::degrees(peak);
+        db = 0.0f;
+        for (const WeaponEvent& e : ev)
+            if (e.type == WeaponEvent::Shot) db = e.loudness;
+    };
+    float rPlain, rBrake, rCan, dPlain, dBrake, dCan;
+    ItemPtr braked = makeLoadedWeapon(kRifle);
+    braked->att[AS_Muzzle] = brake;
+    fireOnce(makeLoadedWeapon(kRifle), rPlain, dPlain);
+    fireOnce(std::move(braked), rBrake, dBrake);
+    ItemPtr can2 = makeLoadedWeapon(kRifle);
+    can2->att[AS_Muzzle] = supp;
+    fireOnce(std::move(can2), rCan, dCan);
+    std::printf("  muzzle rise after a shot: plain %.2f deg, brake %.2f deg, suppressor %.2f deg; report %.0f / %.0f / %.0f dB\n", rPlain, rBrake, rCan,
+                dPlain, dBrake, dCan);
+    check(rBrake < rPlain * 0.95f && dBrake > dPlain && dCan < dPlain - 20.0f, "brake: less rise, louder; suppressed shot is quieter");
+
+    // Bipod: rest the legs on a crate in front, aim, and the hold steadies.
+    auto hold = [&](bool crate, bool& deployed) {
+        World wd = groundWorld();
+        if (crate) {
+            Collider c;
+            c.box = OBB::fromCenterSize(glm::vec3(0, 1.0f, -1.0f), glm::vec3(1.0f, 0.62f, 1.2f)); // top at 1.31 m
+            wd.add(c);
+        }
+        Equipment eq;
+        ItemPtr g = makeLoadedWeapon(kRifle);
+        g->att[AS_Under] = findAttachment("bp_light");
+        eq.slots[ES_Hand0] = std::move(g);
+        Weapon w;
+        WeaponContext ctx;
+        ctx.eye = glm::vec3(0, 1.62f, 0);
+        ctx.aimPoint = glm::vec3(0, 1.62f, -100.0f);
+        ctx.crouching = true;
+        w.init(ctx, &eq, 0, true);
+        WeaponInput in;
+        in.adsHeld = true;
+        Ballistics bl;
+        std::vector<Impact> imp;
+        std::vector<WeaponEvent> ev;
+        double sum = 0.0;
+        int n = 0;
+        deployed = false;
+        for (int i = 0; i < 240 * 12; ++i) {
+            w.update(in, ctx, 1.0f / 240.0f, wd, bl, imp, ev);
+            deployed |= w.bipodDeployed();
+            if (i > 240 * 3) {
+                sum += glm::dot(w.drift(), w.drift());
+                ++n;
+            }
+        }
+        return float(std::sqrt(sum / n));
+    };
+    bool dep0, dep1;
+    float free = hold(false, dep0), rested = hold(true, dep1);
+    std::printf("  bipod: drift %.3f deg free, %.3f deg rested (deployed %d/%d)\n", glm::degrees(free), glm::degrees(rested), int(dep0), int(dep1));
+    check(!dep0 && dep1 && rested < free * 0.5f, "bipod deploys on a crate and steadies the hold");
+
+    // Save: attachments, folded stock and armour condition survive; old lines still load.
+    ItemPtr kit = makeLoadedWeapon(findWeapon("volk762"), 1);
+    kit->att[AS_Muzzle] = findAttachment("sup_r762");
+    kit->att[AS_Side] = findAttachment("sl_combo");
+    kit->folded = true;
+    std::stringstream ss;
+    writeItem(ss, *kit);
+    ItemPtr back = readItem(ss);
+    check(back && back->att[AS_Muzzle] == kit->att[AS_Muzzle] && back->att[AS_Side] == kit->att[AS_Side] && back->folded,
+          "attachments survive a save");
+    ItemPtr vest = makeItem("arm_assault");
+    vest->condition = 31.5f;
+    std::stringstream sv;
+    writeItem(sv, *vest);
+    ItemPtr v2 = readItem(sv);
+    check(v2 && std::abs(v2->condition - 31.5f) < 0.01f, "armour condition survives a save");
+    std::stringstream old("{ w_ridgeline556 1 556_fmj 1 1 100 0 1 0 0 N N }");
+    ItemPtr o = readItem(old);
+    check(o && o->d().weapon == findWeapon("ridgeline556") && o->att[AS_Muzzle] < 0, "an old-format item line still loads");
+}
+
 int runSelfTest() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     g_ok = ArmModel::selfTest();
@@ -667,10 +1024,15 @@ int runSelfTest() {
     healthTest();
     driftTest();
     weaponFeedTest();
+    attachmentTest();
+    armorTest();
+    botKitTest();
     terrainTest();
     audioTest();
     playerFlowTest();
     entranceTest();
+    levelsTest();
+    duelTest();
     rarityTest();
     storeTest();
     raidTest();

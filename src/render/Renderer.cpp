@@ -1,5 +1,7 @@
 #include "render/Renderer.h"
 
+#include <string>
+
 #include "physics/Collision.h"
 #include "render/StaticScene.h"
 
@@ -87,7 +89,10 @@ void Renderer::shutdown() {
     if (m_shadowTex) glDeleteTextures(1, &m_shadowTex);
 }
 
-void Renderer::begin() { m_items.clear(); }
+void Renderer::begin() {
+    m_items.clear();
+    m_spots.clear();
+}
 
 void Renderer::draw(const Mesh& mesh, const glm::mat4& model, const glm::vec3& color, Pattern pattern,
                     const glm::vec4& param, bool castShadow) {
@@ -204,6 +209,13 @@ void Renderer::renderView(const Camera& camera, GLuint fbo, int width, int heigh
     m_lit.set("uCamPos", camera.position);
     m_lit.set("uSkyColor", skyColor);
     m_lit.set("uShadowMap", 0);
+    m_lit.set("uSpotCount", int(m_spots.size()));
+    for (int i = 0; i < int(m_spots.size()); ++i) {
+        std::string k = "uSpots[" + std::to_string(i) + "]";
+        m_lit.set((k + ".position").c_str(), m_spots[i].position);
+        m_lit.set((k + ".direction").c_str(), m_spots[i].direction);
+        m_lit.set((k + ".range").c_str(), m_spots[i].range);
+    }
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_shadowTex);
 

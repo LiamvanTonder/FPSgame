@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "game/Ballistics.h"
 
@@ -14,6 +14,9 @@ struct Part {
         Action = 2,    // slides back with the slide / bolt / pump
         Hand = 4,
         Bolt = 8,      // turn-bolt: rotates about the bore axis and slides back while loading
+        Stock = 16,    // built-in stock: replaced by a fitted stock, hidden when folded
+        MuzzleCap = 32, // crown / thread protector: replaced by a muzzle device
+        Grip = 64,     // built-in pistol grip: replaced by a fitted grip
     };
     glm::vec3 center, size, color;
     float tiltX = 0.0f; // rotation about local X (radians)
@@ -34,10 +37,17 @@ enum Caliber {
 };
 const char* caliberName(int caliber);
 
+// Muzzle threads: a muzzle device (suppressor, brake, ...) needs the gun's thread.
+enum Thread { Th_None, Th_P9, Th_P45, Th_P57, Th_R556, Th_R545, Th_R762, Th_R308, Th_R338, Th_S12, kThreadCount };
+const char* threadName(int thread);
+// How a stock attaches (stocks only swap between guns with the same mount).
+enum StockMount { SM_None, SM_Buffer, SM_Folder, SM_Precision, SM_PistolAdapter, kStockMountCount };
+const char* stockMountName(int mount);
+
 // Magazine families: a weapon accepts the families in its mask.
 enum MagFamily {
     Mag_Pistol9, Mag_Pistol45, Mag_Pistol10, Mag_Smg9, Mag_Smg45, Mag_Pdw46, Mag_Stanag, Mag_545, Mag_762x39,
-    Mag_308, Mag_54R, Mag_308Bolt, Mag_Box556, Mag_Pistol57, Mag_Pdw57, Mag_12Box, Mag_65, Mag_Box308, kMagFamilyCount
+    Mag_308, Mag_54R, Mag_308Bolt, Mag_Box556, Mag_Pistol57, Mag_Pdw57, Mag_12Box, Mag_65, Mag_Box308, Mag_338, kMagFamilyCount
 };
 inline uint32_t magBit(int family) { return 1u << family; }
 
@@ -104,6 +114,30 @@ struct WeaponDef {
     float railZ = -0.37f;  // centre of the optic mount
     int maxOptic = 0;      // highest compatible index into opticDefs()
 
+    // Attachment mounts (filled in by deriveMounts from the geometry; catalogue entries may override).
+    float mass = 0.0f;           // kg, bare gun (0: estimate)
+    int thread = -1;             // Thread (-1: derive from the calibre)
+    bool underRail = false, sideRail = false, gripMount = false, offsetMount = false;
+    int stockMount = -1;         // StockMount (-1: derive)
+    int opticMount = -1;         // largest optic class that fits the top rail (0 none .. 3 long scopes)
+    bool foldingStock = false;   // the built-in stock folds
+    bool mountsDerived = false;
+    glm::vec3 underPoint{0.0f}, sidePoint{0.0f}, gripPoint{0.0f};
+    float stockFrontZ = 0.0f;    // where the stock meets the receiver
+    float bulletDiameter = 0.0f; // of the standard round (suppressor bore check)
+
+    // Set on the configured gun (Item::weaponDef) by its attachments.
+    float inertia = 0.0f;        // kg m^2 about the pivot
+    int light = 0;               // 0 none, 1 light, 2 laser, 3 both
+    glm::vec3 lightPoint{0.0f};  // emitter (weapon-local)
+    bool bipod = false, heavyBipod = false;
+    glm::vec3 bipodPoint{0.0f};  // where the legs meet the ground support
+    bool offsetSight = false;
+    glm::vec3 offsetPoint{0.0f}; // offset dot window centre
+    bool magnifier = false;
+    bool foldable = false;       // the stock (built-in or fitted) folds
+    bool folded = false;
+
     // Forearm attachment (weapon-local) and elbow offsets from the hands (body frame)
     glm::vec3 rightHand{0.0f}, leftHand{0.0f};
     glm::vec3 rightElbowFromHand{0.10f, -0.16f, 0.17f}, leftElbowFromHand{-0.15f, -0.19f, 0.22f};
@@ -124,7 +158,12 @@ struct OpticDef {
     float objectiveRadius = 0.0f;
     float eyeRelief = 0.0f;
     float axisAboveRail = 0.0f;  // optical axis height over the rail top
+    int mount = 1;               // rail needed: 1 compact (pistol plate), 2 short rail, 3 long rail
+    bool item = true;            // false: a sight picture only (offset dot, magnified combos)
 };
+
+// Sight pictures that are not optic items of their own.
+enum { kOpticOffsetDot = 10, kOpticDotMagnified = 11, kOpticHoloMagnified = 12 };
 
 // The original hand-built guns keep their indices.
 enum WeaponId { kPistol = 0, kSmg, kShotgun, kRifle, kSniper };
@@ -132,6 +171,11 @@ enum WeaponId { kPistol = 0, kSmg, kShotgun, kRifle, kSniper };
 const std::vector<WeaponDef>& weaponDefs();
 int findWeapon(const std::string& id);
 const std::vector<OpticDef>& opticDefs();
+
+// Can this optic (opticDefs index) go on this gun's top rail?
+bool opticFits(const WeaponDef& w, int optic);
+// Fills in attachment mounts from the gun's class, calibre and geometry.
+void deriveMounts(WeaponDef& w);
 
 // Optic geometry for a weapon, in weapon-local space.
 void buildOpticParts(const WeaponDef& w, const OpticDef& o, std::vector<Part>& out);

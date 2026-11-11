@@ -9,6 +9,7 @@
 #include <vector>
 
 struct Grid;
+struct WeaponDef;
 
 // A concrete item. Magazines and internally-fed guns hold their rounds in order
 // (back() is the next round to feed); weapons carry their own mag, chamber and optic.
@@ -28,6 +29,13 @@ struct Item {
     bool fullAuto = false;
     float loadT = -1.0f, loadDelay = 0.0f; // single-load sequence
     bool caseInChamber = false;
+    int att[kAttachSlots] = {-1, -1, -1, -1, -1, -1, -1}; // fitted attachments (attachmentDefs index)
+    bool folded = false;    // folding stock folded
+    bool lightOn = false;   // weapon light / laser switched on
+    bool altSight = false;  // offset sight / magnifier in use
+
+    // Armour
+    float condition = 0.0f; // remaining condition points
 
     // Medical
     int uses = 1;
@@ -37,6 +45,13 @@ struct Item {
     std::unique_ptr<Grid> grid;
 
     const ItemDef& d() const { return itemDefs()[def]; }
+    // Weapons: the gun as configured (base model plus attachments).
+    const WeaponDef& weaponDef() const;
+    bool hasAttachment(int slot) const { return slot >= 0 && slot < kAttachSlots && att[slot] >= 0; }
+    // Removes all cached state derived from the attachments (call after changing them).
+    void attachmentsChanged() const { effKey = ~0ull; }
+    mutable std::shared_ptr<const WeaponDef> eff;
+    mutable unsigned long long effKey = ~0ull;
     int width(bool rot) const { return rot ? d().h : d().w; }
     int height(bool rot) const { return rot ? d().w : d().h; }
     std::unique_ptr<Item> clone() const;
@@ -83,7 +98,7 @@ struct Grid {
     Grid clone() const;
 };
 
-enum EquipSlot { ES_Hand0, ES_Hand1, ES_Back0, ES_Back1, ES_Rig, ES_Backpack, kEquipSlots };
+enum EquipSlot { ES_Hand0, ES_Hand1, ES_Back0, ES_Back1, ES_Rig, ES_Backpack, ES_Armor, ES_Helmet, kEquipSlots };
 const char* equipSlotName(int slot);
 
 // What a character carries.

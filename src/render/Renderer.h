@@ -45,6 +45,14 @@ public:
     void setStatic(const StaticScene* scene) { m_static = scene; }
     float staticDrawDistance = 900.0f;
     int lastStaticChunks = 0;
+    // Weapon lights for this frame (cleared by begin()).
+    struct SpotLight {
+        glm::vec3 position, direction;
+        float range;
+    };
+    void addSpot(const glm::vec3& p, const glm::vec3& dir, float range) {
+        if (m_spots.size() < 8) m_spots.push_back({p, dir, range});
+    }
     // Items submitted while set are tagged as part of the held weapon.
     void setWeaponLayer(bool on) { m_weaponLayer = on; }
 
@@ -70,5 +78,6 @@ private:
     bool m_weaponLayer = false;
     const StaticScene* m_static = nullptr;
     std::vector<DrawItem> m_items;
+    std::vector<SpotLight> m_spots;
     std::vector<const DrawItem*> m_sorted;
 };

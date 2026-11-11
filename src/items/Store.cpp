@@ -1,5 +1,6 @@
 #include "items/Store.h"
 
+#include "game/Attachments.h"
 #include "game/WeaponDefs.h"
 #include "items/Profile.h"
 
@@ -13,6 +14,8 @@ const char* storeTabName(StoreTab t) {
     case StoreTab::Magazines: return "Magazines";
     case StoreTab::Medical: return "Medical";
     case StoreTab::Optics: return "Optics";
+    case StoreTab::Attachments: return "Attachments";
+    case StoreTab::Armor: return "Armour";
     case StoreTab::Gear: return "Gear";
     default: return "?";
     }
@@ -49,6 +52,14 @@ std::vector<StoreOffer> offers(StoreTab tab) {
             if (tab != StoreTab::Optics) continue;
             o.price = int(std::round(d.value * 1.2f));
             break;
+        case ItemCat::Attachment:
+            if (tab != StoreTab::Attachments) continue;
+            o.price = int(std::round(d.value * 1.2f));
+            break;
+        case ItemCat::Armor: case ItemCat::Helmet:
+            if (tab != StoreTab::Armor || d.value > kRaidOnlyValue) continue;
+            o.price = int(std::round(d.value * 1.2f / 10.0f)) * 10;
+            break;
         default:
             if (tab != StoreTab::Gear) continue;
             o.price = int(std::round(d.value * 1.2f));
@@ -58,6 +69,10 @@ std::vector<StoreOffer> offers(StoreTab tab) {
     }
     std::sort(out.begin(), out.end(), [&](const StoreOffer& a, const StoreOffer& b) {
         const ItemDef &da = defs[a.def], &db = defs[b.def];
+        if (tab == StoreTab::Attachments && da.attach >= 0 && db.attach >= 0 &&
+            attachmentDefs()[da.attach].slot != attachmentDefs()[db.attach].slot)
+            return attachmentDefs()[da.attach].slot < attachmentDefs()[db.attach].slot;
+        if (tab == StoreTab::Armor && da.cat != db.cat) return da.cat < db.cat;
         if (da.caliber != db.caliber && tab != StoreTab::Weapons) return da.caliber < db.caliber;
         return a.price < b.price;
     });
@@ -92,7 +107,8 @@ bool fits(const ItemDef& d, int weapon) {
     const WeaponDef& w = weaponDefs()[weapon];
     if (d.cat == ItemCat::Ammo) return d.caliber == w.caliber;
     if (d.cat == ItemCat::Magazine) return magazineFits(d, weapon);
-    if (d.cat == ItemCat::Optic) return d.optic <= w.maxOptic;
+    if (d.cat == ItemCat::Optic) return opticFits(w, d.optic);
+    if (d.cat == ItemCat::Attachment) return attachmentFits(w, d.attach);
     return false;
 }
 

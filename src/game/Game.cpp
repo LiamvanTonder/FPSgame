@@ -1,4 +1,4 @@
-﻿#include "game/Game.h"
+#include "game/Game.h"
 
 #include "core/Paths.h"
 #include "core/Window.h"
@@ -130,6 +130,8 @@ void Game::deploy(bool pistolOnly) {
     rebuildScene();
     m_sim.message(pistolOnly ? "Pistol run: your loadout is safe at home. Map: M"
                              : "Find loot, take what others carry, and get out alive. Map: M");
+    if (m_sim.map.lootZone.radius > 0.0f) m_sim.message("Loot zone this raid: " + m_sim.map.lootZone.name + " (orange on the map)");
+    m_inLootZone = false;
 }
 
 void Game::endRaid(bool extracted) {
@@ -333,6 +335,8 @@ void Game::readInput() {
     w.firePressed |= aimControl && !m_ignoreClick && m_input.mousePressed(GLFW_MOUSE_BUTTON_LEFT);
     w.reloadPressed |= aimControl && m_input.pressed(GLFW_KEY_R);
     w.toggleFireMode |= aimControl && m_input.pressed(GLFW_KEY_B);
+    w.toggleLight |= aimControl && m_input.pressed(GLFW_KEY_L);
+    w.toggleSight |= aimControl && m_input.pressed(GLFW_KEY_V);
     if (aimControl) {
         for (int i = 0; i < 2; ++i)
             if (m_input.pressed(GLFW_KEY_1 + i)) w.selectWeapon = i;
@@ -357,6 +361,7 @@ void Game::frame(double frameTime) {
             m_in.cancelAction = false;
             WeaponInput& w = m_in.weapon;
             w.firePressed = w.reloadPressed = w.toggleFireMode = false;
+            w.toggleLight = w.toggleSight = false;
             w.selectWeapon = -1;
             w.zoomSteps = 0.0f;
             w.zeroSteps = 0;
@@ -638,6 +643,11 @@ void Game::drawHud() {
     Character& p = m_sim.player();
     const Weapon& wpn = p.weapon;
     bool raid = m_sim.mode == Simulation::Mode::Raid;
+    if (raid && p.alive()) {
+        bool in = m_sim.map.inLootZone(p.position);
+        if (in != m_inLootZone) m_sim.message(in ? "Entering the loot zone: better gear, more company" : "Leaving the loot zone");
+        m_inLootZone = in;
+    }
 
     // Incoming fire: darkened edges when rounds crack past, a red flash when hit.
     if (m_sim.suppression > 0.01f) {
@@ -881,6 +891,19 @@ void Game::drawMap(float W, float H) {
         if (l.name == "Woods") continue;
         glm::vec2 m = toMap(l.center);
         m_hud.text(m.x - Hud::textWidth(l.name, 1.6f) * 0.5f, m.y - 30, l.name, glm::vec4(0.15f, 0.12f, 0.1f, 1.0f), 1.6f);
+    }
+    if (m_sim.map.lootZone.radius > 0.0f) {
+        // This raid's loot zone: a dashed orange ring.
+        const LootZone& z = m_sim.map.lootZone;
+        glm::vec2 c = toMap(z.center);
+        float r = z.radius / (2 * half) * size;
+        for (int i = 0; i < 72; ++i) {
+            if (i % 3 == 2) continue;
+            float a = i / 72.0f * 6.2832f;
+            m_hud.rect(c.x + std::cos(a) * r - 2, c.y + std::sin(a) * r - 2, 5, 5, glm::vec4(1.0f, 0.5f, 0.05f, 0.95f));
+        }
+        std::string label = "LOOT ZONE";
+        m_hud.text(c.x - Hud::textWidth(label, 2.0f) * 0.5f, c.y - r - 26, label, glm::vec4(0.85f, 0.35f, 0.0f, 1.0f), 2.0f);
     }
     for (const Hotspot& h : m_sim.map.hotspots) {
         glm::vec2 m = toMap(glm::vec2(h.position.x, h.position.z));

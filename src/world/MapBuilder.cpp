@@ -315,7 +315,7 @@ void MapBuilder::house(const glm::vec2& c, int front, float w, float d, int tier
 }
 
 void MapBuilder::bigBuilding(const glm::vec2& c, int front, float w, float d, float h, const glm::vec3& col, Surface s, Pattern p,
-                             float doorW, float doorH, int crates, int tier, int hotspot, bool racks) {
+                             float doorW, float doorH, int crates, int tier, int hotspot, bool racks, bool mezz) {
     const float t = 0.3f;
     float floorY = footprintHeight(c, w * 0.5f, d * 0.5f) + 0.1f;
     float x0 = c.x - w * 0.5f, z0 = c.y - d * 0.5f;
@@ -356,6 +356,7 @@ void MapBuilder::bigBuilding(const glm::vec2& c, int front, float w, float d, fl
     addWallDoors(east, {x0 + w - t, fy, z0 + t}, 1, t, {1.0f, 0.0f});
     recordEntrances(fy);
     solid({x0 - 0.3f, fy + h, z0 - 0.3f}, {x0 + w + 0.3f, fy + h + 0.15f, z0 + d + 0.3f}, kRoof, Surface::Metal);
+    if (mezz && h >= 5.5f) mezzanine(x0, z0, w, fy, t, std::min(3.4f, h - 2.3f));
 
     if (racks) {
         // Rows of shelving with aisles
@@ -364,6 +365,7 @@ void MapBuilder::bigBuilding(const glm::vec2& c, int front, float w, float d, fl
         int rows = int(((alongX ? d : w) - 6.0f) / 4.0f);
         for (int r = 0; r < rows; ++r) {
             float off = -((alongX ? d : w) * 0.5f - 3.0f) + r * 4.0f + 2.0f;
+            if (mezz && alongX && off < -((d * 0.5f) - 4.6f)) continue; // keep clear of the walkway
             for (int seg = 0; seg < 2; ++seg) {
                 float a = -len * 0.5f + seg * (len * 0.5f + 1.0f), b = a + len * 0.5f - 1.0f;
                 if (alongX) solid({c.x + a, fy, c.y + off - 0.5f}, {c.x + b, fy + 2.6f, c.y + off + 0.5f}, kMetalDark, Surface::Metal);
@@ -384,6 +386,242 @@ void MapBuilder::bigBuilding(const glm::vec2& c, int front, float w, float d, fl
     }
     reserve(c, glm::vec2(w * 0.5f + 2.0f, d * 0.5f + 2.0f));
     m_map->mapRects.push_back({c, glm::vec2(w, d) * 0.5f, 0.0f, col * 0.8f});
+}
+
+void MapBuilder::stairs(const glm::vec3& foot, const glm::vec2& dir, float width, float top, const glm::vec3& color) {
+    // Risers low enough that a body spanning two treads can still step up both.
+    const float riser = 0.16f, tread = 0.28f;
+    int n = std::max(1, int(std::ceil((top - foot.y) / riser - 0.01f)));
+    float r = (top - foot.y) / n;
+    glm::vec2 side(-dir.y, dir.x);
+    for (int i = 0; i < n; ++i) {
+        glm::vec2 a = glm::vec2(foot.x, foot.z) + dir * (tread * i), b = a + dir * tread;
+        glm::vec2 s0 = a - side * (width * 0.5f), s1 = b + side * (width * 0.5f);
+        solid({std::min(s0.x, s1.x), foot.y - 0.3f, std::min(s0.y, s1.y)}, {std::max(s0.x, s1.x), foot.y + r * (i + 1), std::max(s0.y, s1.y)},
+              color * (i % 2 ? 0.95f : 1.0f), Surface::Wood, Pattern::Planks);
+    }
+}
+
+void MapBuilder::twoStorey(const glm::vec2& c, int front, float w, float d, const glm::vec3& col, Surface surf, Pattern pat, int tier,
+                           int hotspot, bool balcony, bool roofAccess) {
+    // front: 0 faces -Z, 2 faces +Z (the stair runs along the west wall, rising toward +Z).
+    const float t = 0.25f, h1 = 3.0f, slab = 0.2f, h2 = 2.8f;
+    float floorY = footprintHeight(c, w * 0.5f, d * 0.5f) + 0.15f;
+    float x0 = c.x - w * 0.5f, z0 = c.y - d * 0.5f, x1 = x0 + w, z1 = z0 + d;
+    solid({x0 - 0.1f, floorY - 1.2f, z0 - 0.1f}, {x1 + 0.1f, floorY, z1 + 0.1f}, kDarkConcrete, Surface::Concrete);
+    solid({x0, floorY, z0}, {x1, floorY + 0.04f, z1}, kWood, Surface::Wood, Pattern::Planks);
+    float fy = floorY + 0.04f, y2 = fy + h1 + slab, y3 = y2 + h2;
+
+    auto door = [](float off) { return Opening{off, 1.7f, 0.0f, 2.15f}; };
+    auto window = [](float off) { return Opening{off, 1.3f, 1.0f, 2.0f}; };
+    // Ground floor: front door, back door, windows; the stair hugs the west wall.
+    std::vector<Opening> north{window(w * 0.3f), window(w * 0.75f)}, south = north, west{}, east{window(d * 0.3f), window(d * 0.75f)};
+    if (front == 0) {
+        north = {door(w * 0.62f), window(w * 0.85f)};
+        south = {door(w * 0.55f), window(w * 0.82f)};
+    } else {
+        south = {door(w * 0.62f), window(w * 0.85f)};
+        north = {door(w * 0.55f), window(w * 0.82f)};
+    }
+    wall({x0, fy, z0}, 0, w, t, h1, north, col, surf, pat);
+    wall({x0, fy, z1 - t}, 0, w, t, h1, south, col, surf, pat);
+    wall({x0, fy, z0 + t}, 1, d - 2 * t, t, h1, west, col, surf, pat);
+    wall({x1 - t, fy, z0 + t}, 1, d - 2 * t, t, h1, east, col, surf, pat);
+    m_doors.clear();
+    addWallDoors(north, {x0, fy, z0}, 0, t, {0.0f, -1.0f});
+    addWallDoors(south, {x0, fy, z1 - t}, 0, t, {0.0f, 1.0f});
+    addWallDoors(east, {x1 - t, fy, z0 + t}, 1, t, {1.0f, 0.0f});
+    recordEntrances(fy);
+
+    // Stair: 1.1 m wide along the west wall, foot near the north end, rising toward +Z.
+    const float sw = 1.1f, tread = 0.28f;
+    int nSteps = int(std::ceil((y2 - fy) / 0.16f - 0.01f));
+    float run = nSteps * tread;
+    float sx0 = x0 + t, sx1 = sx0 + sw, scx = (sx0 + sx1) * 0.5f;
+    float zs = z0 + t + 1.2f;
+    stairs({scx, fy, zs}, {0.0f, 1.0f}, sw, y2, kWood);
+    m_doors.push_back({{scx, zs - 0.5f}, {0.0f, 0.0f}});
+    m_doors.push_back({{scx, zs + run * 0.5f}, {0.0f, 0.0f}});
+    m_doors.push_back({{scx, zs + run + 0.6f}, {0.0f, 0.0f}});
+    // Upper floor slab with the stairwell open above the flight.
+    float hx = sx1 + 0.05f;
+    solid({hx, y2 - slab, z0 + t}, {x1 - t, y2, z1 - t}, kWood, Surface::Wood, Pattern::Planks);
+    solid({x0 + t, y2 - slab, zs + run}, {hx, y2, z1 - t}, kWood, Surface::Wood, Pattern::Planks);
+    solid({x0 + t, y2 - slab, z0 + t}, {hx, y2, zs}, kWood, Surface::Wood, Pattern::Planks);
+    // Railings round the stairwell
+    solid({hx, y2, zs}, {hx + 0.06f, y2 + 1.0f, zs + run - 0.9f}, kWood * 0.8f, Surface::Wood);
+    solid({x0 + t, y2, zs - 0.06f}, {hx + 0.06f, y2 + 1.0f, zs}, kWood * 0.8f, Surface::Wood);
+    m_map->links.push_back({glm::vec3(scx, fy, zs - 0.6f), glm::vec3(scx, y2, zs + run + 0.55f)});
+    m_map->entrances.push_back({glm::vec3(scx, fy, zs - 0.6f), glm::vec3(scx, y2, zs + run + 0.6f)});
+
+    // Upper walls: windows all round (firing positions), a door onto the balcony.
+    float bal = 1.4f;
+    std::vector<Opening> n2{window(w * 0.3f), window(w * 0.72f)}, s2 = n2, w2{window(d * 0.7f)}, e2{window(d * 0.3f), window(d * 0.72f)};
+    if (balcony) {
+        Opening bd{w * 0.62f, 1.2f, 0.0f, 2.15f};
+        if (front == 0) n2 = {window(w * 0.3f), bd};
+        else s2 = {window(w * 0.3f), bd};
+    }
+    wall({x0, y2, z0}, 0, w, t, h2, n2, col, surf, pat);
+    wall({x0, y2, z1 - t}, 0, w, t, h2, s2, col, surf, pat);
+    wall({x0, y2, z0 + t}, 1, d - 2 * t, t, h2, w2, col, surf, pat);
+    if (roofAccess) e2.clear();
+    wall({x1 - t, y2, z0 + t}, 1, d - 2 * t, t, h2, e2, col, surf, pat);
+    auto spots = [&](const std::vector<Opening>& ops, int dir, const glm::vec3& start, const glm::vec2& out) {
+        for (const Opening& o : ops) {
+            if (o.bottom < 0.01f) continue;
+            glm::vec2 q = dir == 0 ? glm::vec2(start.x + o.offset, start.z + t * 0.5f) : glm::vec2(start.x + t * 0.5f, start.z + o.offset);
+            q -= out * 0.75f;
+            m_map->firingSpots.push_back({glm::vec3(q.x, y2, q.y), out});
+        }
+    };
+    spots(n2, 0, {x0, y2, z0}, {0.0f, -1.0f});
+    spots(s2, 0, {x0, y2, z1 - t}, {0.0f, 1.0f});
+    spots(w2, 1, {x0, y2, z0 + t}, {-1.0f, 0.0f});
+    spots(e2, 1, {x1 - t, y2, z0 + t}, {1.0f, 0.0f});
+    NavFloor upper{{x0, z0}, {x1, z1}, y2};
+    if (balcony) {
+        // Slab and railing outside the balcony door.
+        float bz0 = front == 0 ? z0 - bal : z1, bz1 = front == 0 ? z0 : z1 + bal;
+        float bx0 = x0 + w * 0.62f - 1.6f, bx1 = x0 + w * 0.62f + 1.6f;
+        solid({bx0, y2 - slab, bz0}, {bx1, y2, bz1}, kDarkConcrete, Surface::Concrete);
+        float rz = front == 0 ? bz0 : bz1 - 0.06f;
+        solid({bx0, y2, rz}, {bx1, y2 + 1.0f, rz + 0.06f}, kMetalDark, Surface::Metal);
+        solid({bx0, y2, bz0}, {bx0 + 0.06f, y2 + 1.0f, bz1}, kMetalDark, Surface::Metal);
+        solid({bx1 - 0.06f, y2, bz0}, {bx1, y2 + 1.0f, bz1}, kMetalDark, Surface::Metal);
+        if (front == 0) upper.min.y = bz0;
+        else upper.max.y = bz1;
+        m_map->firingSpots.push_back({glm::vec3(x0 + w * 0.62f, y2, front == 0 ? z0 - bal * 0.5f : z1 + bal * 0.5f), front == 0 ? glm::vec2(0, -1) : glm::vec2(0, 1)});
+    }
+    m_map->floors.push_back(upper);
+
+    // Flat roof with a parapet. With roof access, a second flight along the east wall climbs to a hatch.
+    float ry = y3 + 0.2f;
+    bool access = roofAccess;
+    if (access) {
+        int n2 = int(std::ceil((ry - y2) / 0.16f - 0.01f));
+        float run2 = n2 * tread;
+        float foot = z1 - t - 1.2f, scx2 = x1 - t - sw * 0.5f, hx0 = x1 - t - sw - 0.05f;
+        float hz0 = foot - run2, hz1 = foot;
+        stairs({scx2, y2, foot}, {0.0f, -1.0f}, sw, ry, kWood);
+        solid({x0 - 0.15f, y3, z0 - 0.15f}, {hx0, ry, z1 + 0.15f}, kRoof, Surface::Concrete);
+        solid({hx0, y3, z0 - 0.15f}, {x1 + 0.15f, ry, hz0}, kRoof, Surface::Concrete);
+        solid({hx0, y3, hz1}, {x1 + 0.15f, ry, z1 + 0.15f}, kRoof, Surface::Concrete);
+        // Hatch rails on the roof
+        solid({hx0 - 0.06f, ry, hz0 + 0.9f}, {hx0, ry + 1.0f, hz1}, kMetalDark, Surface::Metal);
+        solid({hx0 - 0.06f, ry, hz1}, {x1 - t, ry + 1.0f, hz1 + 0.06f}, kMetalDark, Surface::Metal);
+        m_map->links.push_back({glm::vec3(scx2, y2, foot + 0.6f), glm::vec3(scx2, ry, hz0 - 0.55f)});
+        m_map->entrances.push_back({glm::vec3(scx2, y2, foot + 0.6f), glm::vec3(scx2, ry, hz0 - 0.6f)});
+        m_doors.push_back({{scx2, foot + 0.5f}, {0.0f, 0.0f}});
+        m_doors.push_back({{scx2, (hz0 + hz1) * 0.5f}, {0.0f, 0.0f}});
+        m_doors.push_back({{scx2, hz0 - 0.6f}, {0.0f, 0.0f}});
+    } else {
+        solid({x0 - 0.15f, y3, z0 - 0.15f}, {x1 + 0.15f, ry, z1 + 0.15f}, kRoof, Surface::Concrete);
+    }
+    solid({x0 - 0.15f, ry, z0 - 0.15f}, {x1 + 0.15f, ry + 0.9f, z0 + 0.05f}, col, surf, pat);
+    solid({x0 - 0.15f, ry, z1 - 0.05f}, {x1 + 0.15f, ry + 0.9f, z1 + 0.15f}, col, surf, pat);
+    solid({x0 - 0.15f, ry, z0 + 0.05f}, {x0 + 0.05f, ry + 0.9f, z1 - 0.05f}, col, surf, pat);
+    solid({x1 - 0.05f, ry, z0 + 0.05f}, {x1 + 0.15f, ry + 0.9f, z1 - 0.05f}, col, surf, pat);
+    if (access) m_map->floors.push_back({{x0, z0}, {x1, z1}, ry});
+    if (access)
+        for (const glm::vec2& cpt : {glm::vec2(x0 + 0.8f, z0 + 0.8f), glm::vec2(x0 + 0.8f, z1 - 0.8f), glm::vec2(x0 + w * 0.5f, z0 + 0.8f)})
+            m_map->firingSpots.push_back({glm::vec3(cpt.x, ry, cpt.y), glm::normalize(cpt - c)});
+
+    // Furniture and loot on both floors, clear of doors and the stair.
+    auto clearOf = [&](const glm::vec2& p, float r) { return doorClear(p, r) && !(p.x < sx1 + 0.6f + r && p.y > zs - 1.4f && p.y < zs + run + 1.2f); };
+    auto inside = [&](float fx, float fz) { return glm::vec2(x0 + t + 0.4f + fx * (w - 2 * t - 0.8f), z0 + t + 0.4f + fz * (d - 2 * t - 0.8f)); };
+    glm::vec2 tbl = inside(0.65f, 0.5f);
+    if (clearOf(tbl, 0.8f)) {
+        solid({tbl.x - 0.6f, fy + 0.72f, tbl.y - 0.4f}, {tbl.x + 0.6f, fy + 0.77f, tbl.y + 0.4f}, kWood, Surface::Wood);
+        for (float dx : {-0.5f, 0.5f})
+            for (float dz : {-0.3f, 0.3f}) solid({tbl.x + dx - 0.03f, fy, tbl.y + dz - 0.03f}, {tbl.x + dx + 0.03f, fy + 0.72f, tbl.y + dz + 0.03f}, kWood, Surface::Wood);
+    }
+    ContainerType types[] = {ContainerType::Duffel, ContainerType::MedCabinet, ContainerType::Toolbox, ContainerType::AmmoBox};
+    const glm::vec2 groundSpots[] = {{0.95f, 0.06f}, {0.95f, 0.94f}, {0.5f, 0.94f}};
+    int placed = 0;
+    for (const glm::vec2& f : groundSpots) {
+        glm::vec2 q = inside(f.x, f.y);
+        if (placed >= 1 || !clearOf(q, 0.5f)) continue;
+        container(types[int(u01() * 4) % 4], glm::vec3(q.x, fy, q.y), 0.0f, tier, hotspot);
+        ++placed;
+    }
+    // Upstairs: a bed, a shelf, a container, and spots for loot-zone extras.
+    glm::vec2 bed = inside(0.8f, 0.2f), shelf = roofAccess ? inside(0.6f, 0.97f) : inside(0.95f, 0.85f), box = inside(0.55f, 0.85f);
+    solid({bed.x - 0.55f, y2, bed.y - 0.45f}, {bed.x + 0.55f, y2 + 0.5f, bed.y + 0.45f}, glm::vec3(0.45f, 0.42f, 0.38f), Surface::Wood);
+    solid({shelf.x - 0.2f, y2, shelf.y - 0.5f}, {shelf.x + 0.2f, y2 + 1.8f, shelf.y + 0.5f}, kWood, Surface::Wood, Pattern::Planks);
+    container(types[int(u01() * 4) % 4], glm::vec3(box.x, y2, box.y), 0.0f, tier + 1, hotspot);
+    m_lootSpots.push_back({glm::vec3(inside(0.45f, 0.15f).x, y2, inside(0.45f, 0.15f).y), m_area});
+    if (access) m_lootSpots.push_back({glm::vec3(x0 + w * 0.5f, ry, c.y), m_area});
+    reserve(c, glm::vec2(w * 0.5f + 1.5f, d * 0.5f + 1.5f + (balcony ? bal : 0.0f)));
+    m_map->mapRects.push_back({c, glm::vec2(w, d) * 0.5f, 0.0f, glm::vec3(0.50f, 0.38f, 0.30f)});
+}
+
+void MapBuilder::mezzanine(float x0, float z0, float w, float fy, float t, float hm) {
+    // Walkway 2.6 m deep along the north wall from 55 % of the width to 3 m short of the east wall.
+    // The north wall's small door is at 30 % of the width: the stair (which ends where the walkway
+    // starts) must finish clear of it.
+    int nSteps = int(std::ceil(hm / 0.16f - 0.01f));
+    float a = std::max(x0 + w * 0.55f, x0 + w * 0.3f + 1.6f + nSteps * 0.28f), b = x0 + w - t - 0.2f, depth = 2.6f;
+    if (b - a < 4.0f) return;
+    float zi = z0 + t, zo = zi + depth;
+    float top = fy + hm;
+    solid({a, top - 0.2f, zi}, {b, top, zo}, kMetalDark, Surface::Metal, Pattern::Grid);
+    for (float x = a + 0.3f; x < b; x += 4.0f) solid({x - 0.1f, fy, zo - 0.25f}, {x + 0.1f, top - 0.2f, zo - 0.05f}, kMetalDark, Surface::Metal);
+    solid({a, top, zo - 0.06f}, {b, top + 1.0f, zo}, kMetalDark, Surface::Metal); // railing
+    solid({a, top, zi + 1.25f}, {a + 0.06f, top + 1.0f, zo}, kMetalDark, Surface::Metal); // west end, beside the stair head
+    solid({b - 0.06f, top, zi}, {b, top + 1.0f, zo}, kMetalDark, Surface::Metal);
+    // Stair along the wall, rising toward +X up to the walkway's west end.
+    int n = int(std::ceil(hm / 0.16f - 0.01f));
+    float run = n * 0.28f;
+    float cz = zi + 0.6f;
+    stairs({a - run, fy, cz}, {1.0f, 0.0f}, 1.1f, top, kMetalDark * 1.5f);
+    m_doors.push_back({{a - run - 0.6f, cz}, {0.0f, 0.0f}});
+    m_doors.push_back({{a - run * 0.5f, cz}, {0.0f, 0.0f}});
+    m_doors.push_back({{a - run * 0.5f, zo}, {0.0f, 0.0f}});
+    for (float x = a + 0.5f; x < b; x += 3.0f) m_doors.push_back({{x, zo + 0.4f}, {0.0f, 0.0f}}); // keep crates out from under it
+    m_map->links.push_back({glm::vec3(a - run - 0.6f, fy, cz), glm::vec3(a + 0.6f, top, cz)});
+    m_map->entrances.push_back({glm::vec3(a - run - 0.6f, fy, cz), glm::vec3(a + 0.6f, top, cz)});
+    m_map->floors.push_back({{a, zi}, {b, zo}, top});
+    m_map->firingSpots.push_back({glm::vec3((a + b) * 0.5f, top, zo - 0.5f), glm::vec2(0.0f, 1.0f)});
+    m_lootSpots.push_back({glm::vec3(b - 1.2f, top, zi + 1.0f), m_area});
+    m_lootSpots.push_back({glm::vec3((a + b) * 0.5f, top, zi + 0.9f), m_area});
+}
+
+void MapBuilder::coverCluster(const glm::vec2& c, float radius, int count) {
+    const glm::vec3 kSand(0.62f, 0.56f, 0.40f), kBarrier(0.66f, 0.66f, 0.62f);
+    for (int i = 0; i < count; ++i) {
+        glm::vec2 p = c + glm::vec2(u11(), u11()) * radius;
+        if (blocked(p, 1.8f)) continue;
+        float y = ground(p.x, p.y);
+        bool alongX = u01() < 0.5f;
+        float k = u01();
+        if (k < 0.35f) {
+            // Sandbag wall, chest-high when crouched
+            float L = 2.2f + 1.4f * u01();
+            glm::vec3 half = alongX ? glm::vec3(L * 0.5f, 0.55f, 0.35f) : glm::vec3(0.35f, 0.55f, L * 0.5f);
+            solid(glm::vec3(p.x, y - 0.2f, p.y) - glm::vec3(half.x, 0, half.z), glm::vec3(p.x, y + 1.05f, p.y) + glm::vec3(half.x, 0, half.z), kSand, Surface::Dirt);
+            reserve(p, glm::vec2(half.x, half.z) + glm::vec2(0.6f));
+        } else if (k < 0.6f) {
+            // Concrete barriers in a row
+            for (int j = 0; j < 3; ++j) {
+                glm::vec2 q = p + (alongX ? glm::vec2(j * 2.1f, 0) : glm::vec2(0, j * 2.1f));
+                if (blocked(q, 1.0f)) break;
+                float yy = ground(q.x, q.y);
+                glm::vec3 half = alongX ? glm::vec3(1.0f, 0.0f, 0.3f) : glm::vec3(0.3f, 0.0f, 1.0f);
+                solid(glm::vec3(q.x, yy - 0.2f, q.y) - half, glm::vec3(q.x, yy + 0.95f, q.y) + half, kBarrier, Surface::Concrete);
+            }
+            reserve(p + (alongX ? glm::vec2(2.1f, 0) : glm::vec2(0, 2.1f)), alongX ? glm::vec2(3.8f, 1.0f) : glm::vec2(1.0f, 3.8f));
+        } else if (k < 0.85f) {
+            // Stacked crates (one may be on top)
+            float s = 0.6f + 0.2f * u01();
+            solid({p.x - s, y, p.y - s}, {p.x + s, y + 2 * s, p.y + s}, kCrate, Surface::Wood, Pattern::Planks);
+            if (u01() < 0.5f) solid({p.x - s * 0.8f, y + 2 * s, p.y - s * 0.8f}, {p.x + s * 0.8f, y + 3.6f * s, p.y + s * 0.8f}, kCrate * 0.9f, Surface::Wood, Pattern::Planks);
+            reserve(p, glm::vec2(s + 0.6f));
+        } else {
+            car(p, alongX);
+            reserve(p, alongX ? glm::vec2(3.0f, 1.7f) : glm::vec2(1.7f, 3.0f));
+        }
+    }
 }
 
 void MapBuilder::shed(const glm::vec2& c, int front, float w, float d, int tier, int hotspot) {
@@ -560,6 +798,11 @@ void MapBuilder::village() {
     for (float x : mainOffsets)
         for (int side = -1; side <= 1; side += 2) {
             float w = 8.0f + 2.0f * u01(), d = 7.0f + 2.0f * u01();
+            if ((x == -42.0f && side < 0) || (x == 34.0f && side > 0)) {
+                twoStorey(v + glm::vec2(x, side * 15.0f), side < 0 ? 2 : 0, 10.0f, 8.5f, x < 0 ? kBrick : kPlaster, Surface::Concrete,
+                          x < 0 ? Pattern::Bricks : Pattern::Plain, 1, -1, true, false);
+                continue;
+            }
             house(v + glm::vec2(x, side * 14.0f), side < 0 ? 2 : 0, w, d, 0, -1);
         }
     const float crossOffsets[] = {-58.0f, 30.0f, 54.0f, 78.0f};
@@ -580,6 +823,9 @@ void MapBuilder::village() {
         if (std::abs(off) < 10.0f) off += 20.0f;
         car(alongX ? v + glm::vec2(off, (u01() < 0.5f ? -4.5f : 4.5f)) : v + glm::vec2((u01() < 0.5f ? -4.5f : 4.5f), off), alongX);
     }
+    coverCluster(v + glm::vec2(12.0f, 12.0f), 10.0f, 5);
+    coverCluster(v + glm::vec2(-14.0f, -12.0f), 10.0f, 4);
+    m_lootSpots.push_back({glm::vec3(v.x + 6.0f, ground(v.x + 6.0f, v.y + 6.0f), v.y + 6.0f), m_area});
     m_map->labels.push_back({"Village", v, glm::vec2(180.0f, 160.0f), glm::vec3(0.5f, 0.35f, 0.3f)});
 }
 
@@ -592,14 +838,14 @@ void MapBuilder::industrial() {
     fenceLine(c + glm::vec2(-h.x, -h.y), c + glm::vec2(-h.x, h.y), h.y, 10.0f);
     fenceLine(c + glm::vec2(h.x, -h.y), c + glm::vec2(h.x, h.y), h.y * 1.4f, 8.0f);
 
-    bigBuilding(c + glm::vec2(-35.0f, -15.0f), 1, 36.0f, 24.0f, 7.0f, kMetalSheet, Surface::Metal, Pattern::Grid, 5.0f, 4.5f, 6, 1, -1, true);
+    bigBuilding(c + glm::vec2(-35.0f, -15.0f), 1, 36.0f, 24.0f, 7.0f, kMetalSheet, Surface::Metal, Pattern::Grid, 5.0f, 4.5f, 6, 1, -1, true, true);
     bigBuilding(c + glm::vec2(32.0f, 28.0f), 0, 30.0f, 20.0f, 6.5f, kMetalSheet * 0.9f, Surface::Metal, Pattern::Grid, 5.0f, 4.5f, 5, 1, -1, true);
     int armoury = int(m_map->hotspots.size());
     glm::vec2 ap = c + glm::vec2(45.0f, -38.0f);
     m_map->hotspots.push_back({"Armoury", glm::vec3(ap.x, ground(ap.x, ap.y), ap.y), 20.0f});
     bigBuilding(ap, 3, 10.0f, 7.0f, 3.2f, kDarkConcrete, Surface::Concrete, Pattern::Plain, 1.3f, 2.2f, 5, 3, armoury, false);
-    // Office
-    house(c + glm::vec2(2.0f, -46.0f), 2, 12.0f, 8.0f, 1, -1);
+    // Office: two floors and a roof reached by an outside stair
+    twoStorey(c + glm::vec2(2.0f, -45.0f), 2, 12.0f, 10.0f, kConcrete, Surface::Concrete, Pattern::Plain, 1, -1, false, true);
     // Container stacks
     const glm::vec3 boxCols[] = {{0.55f, 0.22f, 0.15f}, {0.18f, 0.32f, 0.50f}, {0.25f, 0.42f, 0.25f}, {0.60f, 0.48f, 0.20f}};
     for (int row = 0; row < 3; ++row)
@@ -628,16 +874,17 @@ void MapBuilder::industrial() {
         solid({p.x - s, y, p.y - s * 0.7f}, {p.x + s, y + s * 1.2f, p.y + s * 0.7f}, kCrate, Surface::Wood, Pattern::Planks);
         if (u01() < 0.3f) container(ContainerType::Toolbox, glm::vec3(p.x + s + 0.4f, y, p.y), 0.0f, 1, -1);
     }
+    coverCluster(c + glm::vec2(5.0f, 5.0f), 22.0f, 9);
     m_map->labels.push_back({"Industrial yard", c, h * 2.0f, glm::vec3(0.45f, 0.47f, 0.5f)});
 }
 
 void MapBuilder::farm() {
     glm::vec2 f = m_farm;
-    house(f + glm::vec2(-25.0f, -15.0f), 0, 10.0f, 8.0f, 0, -1);
+    twoStorey(f + glm::vec2(-25.0f, -15.0f), 0, 10.0f, 8.5f, kPlaster, Surface::Concrete, Pattern::Plain, 0, -1, true, false);
     int barn = int(m_map->hotspots.size());
     glm::vec2 bp = f + glm::vec2(15.0f, 5.0f);
     m_map->hotspots.push_back({"Barn cache", glm::vec3(bp.x, ground(bp.x, bp.y), bp.y), 22.0f});
-    bigBuilding(bp, 1, 22.0f, 14.0f, 6.0f, kBarnRed, Surface::Wood, Pattern::Planks, 4.0f, 4.0f, 6, 2, barn, false);
+    bigBuilding(bp, 1, 22.0f, 14.0f, 6.0f, kBarnRed, Surface::Wood, Pattern::Planks, 4.0f, 4.0f, 6, 2, barn, false, true);
     shed(f + glm::vec2(10.0f, -30.0f), 3, 6.0f, 5.0f, 0, -1);
     // Hay bales
     for (int i = 0; i < 18; ++i) {
@@ -664,6 +911,7 @@ void MapBuilder::farm() {
         stoneWall({b.x, a.y}, {b.x, b.y}, -1.0f);
         m_map->mapRects.push_back({fl.c, fl.h, 0.0f, glm::vec3(0.62f, 0.56f, 0.34f)});
     }
+    coverCluster(f + glm::vec2(-5.0f, 22.0f), 12.0f, 5);
     m_map->labels.push_back({"Farm", f, glm::vec2(140.0f), glm::vec3(0.6f, 0.5f, 0.3f)});
 }
 
@@ -698,6 +946,7 @@ void MapBuilder::radioTower() {
     }
     visual(OBB::fromCenterSize(glm::vec3(r.x, y + H + 0.4f, r.y), glm::vec3(0.5f)), glm::vec3(1.0f, 0.1f, 0.05f), Pattern::Unlit);
     reserve(r, glm::vec2(5.0f));
+    twoStorey(r + glm::vec2(-12.0f, 11.0f), 0, 10.5f, 10.0f, kDarkConcrete, Surface::Concrete, Pattern::Plain, 2, hs, false, true);
     shed(r + glm::vec2(10.0f, 6.0f), 1, 6.0f, 4.0f, 2, hs);
     shed(r + glm::vec2(-9.0f, -8.0f), 3, 5.0f, 4.0f, 2, hs);
     solid(glm::vec3(r.x + 6.0f, y, r.y - 7.0f), glm::vec3(r.x + 8.0f, y + 1.4f, r.y - 5.8f), kMetalDark, Surface::Metal); // generator
@@ -706,6 +955,7 @@ void MapBuilder::radioTower() {
     fenceLine(r + glm::vec2(-h.x, h.y), r + glm::vec2(h.x, h.y), h.x, 6.0f);
     fenceLine(r + glm::vec2(-h.x, -h.y), r + glm::vec2(-h.x, h.y), h.y, 6.0f);
     fenceLine(r + glm::vec2(h.x, -h.y), r + glm::vec2(h.x, h.y), -1.0f);
+    coverCluster(r + glm::vec2(8.0f, -12.0f), 6.0f, 3);
     m_map->labels.push_back({"Radio tower", r, glm::vec2(50.0f), glm::vec3(0.6f, 0.3f, 0.3f)});
 }
 
@@ -867,10 +1117,43 @@ void MapBuilder::build(unsigned seed, World& world, Terrain& terrain, MapData& m
         const char* names[] = {"North road", "East bridge", "South fields", "West ridge"};
         extraction(names[i], extracts[i]);
     }
+    m_lootSpots.clear();
+    {
+        // This raid's loot zone: one of the four areas, picked from the seed.
+        std::mt19937 pickRng(seed * 2654435761u + 97u);
+        int area = int(pickRng() % 4u);
+        const char* names[] = {"Village", "Industrial yard", "Farm", "Radio tower"};
+        const glm::vec2 centres[] = {m_village, m_industrial, m_farm, m_radio};
+        const float radii[] = {105.0f, 100.0f, 90.0f, 40.0f};
+        map.lootZone = LootZone{names[area], centres[area], radii[area], area};
+    }
+    m_area = 0;
     village();
+    m_area = 1;
     industrial();
+    m_area = 2;
     farm();
+    m_area = 3;
     radioTower();
+    m_area = -1;
+    // Containers in the loot zone carry better gear; extra caches go upstairs and on walkways.
+    for (ContainerSpawn& cs : map.containers)
+        if (map.inLootZone(cs.position)) {
+            cs.lootZone = true;
+            cs.tier = std::max(cs.tier, 1);
+        }
+    {
+        int extra = 0;
+        const ContainerType kinds[] = {ContainerType::WeaponCrate, ContainerType::Duffel, ContainerType::AmmoBox, ContainerType::WeaponCrate,
+                                       ContainerType::MedCabinet, ContainerType::Duffel};
+        for (const LootSpot& ls : m_lootSpots)
+            if (ls.area == map.lootZone.area && extra < 6) {
+                container(kinds[extra % 6], ls.p, u01() * 6.28f, 2, -1);
+                map.containers.back().lootZone = true;
+                ++extra;
+            }
+        for (Hotspot& h : map.hotspots) h.lootZone = map.inLootZone(h.position);
+    }
     // Woods darken the ground under them (after structures so they avoid them)
     woods();
     for (const SceneBlock& b : m_map->blocks) {

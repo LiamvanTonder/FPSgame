@@ -21,6 +21,11 @@ struct Contact {
     float uncertainty = 0.0f;  // metres
     bool visible = false;
     bool dead = false;
+    float power = 0.5f;        // how well armed they looked (0..1), 0.5 until seen
+    double lastHurt = -1e9;    // we hit them, or heard them in pain
+    double lastReload = -1e9;  // heard them reloading
+    glm::vec3 seenAt{1e9f};    // where they were when the stalemate clock started
+    double stillSince = -1e9;
 };
 
 struct Noise {
@@ -31,6 +36,8 @@ struct Noise {
 };
 
 enum class Goal { Roam, Loot, Hunt, Fight, Heal, Extract, Flee, SendBack };
+// How a bot is fighting right now.
+enum class Tactic { Engage, Flank, Push, Withdraw, Search };
 const char* goalName(Goal g);
 
 struct Bot {
@@ -44,9 +51,9 @@ struct Bot {
     double goalSince = 0.0;
 
     // Navigation
-    std::vector<glm::vec2> path;
+    std::vector<glm::vec3> path; // waypoints with their level's height (stairs included)
     size_t pathIndex = 0;
-    glm::vec2 destination{1e9f};
+    glm::vec3 destination{1e9f};
     double pathTime = -1e9;
     glm::vec2 stuckPos{0.0f};
     double stuckSince = 0.0;
@@ -83,6 +90,40 @@ struct Bot {
     double phaseUntil = 0.0;
     double lastDamaged = -1e9;
     glm::vec3 damagedFrom{0.0f};
+    Tactic tactic = Tactic::Engage;
+    double tacticSince = 0.0, engageSince = -1e9, lastFlank = -1e9, flankCheck = 0.0;
+    glm::vec3 tacticPoint{1e9f};
+    int peeks = 0, peekLimit = 3;
+    glm::vec2 lastCover{1e9f};
+    float coverY = 0.0f;          // height of the cover spot (upper-floor windows)
+    bool coverIsWindow = false;
+    bool hiddenRoute = false;     // plan the next path away from known enemies' sight
+    double exposedSince = -1e9;   // stats: standing in the open with an enemy in view
+    float maxExposed = 0.0f;
+    int shots = 0, coveredShots = 0;
+    double dazzledUntil = -1e9;
+
+    // Kit and strategy
+    float power = 0.5f;           // own kit (0..1)
+    int spawnValue = -1;
+    bool ambusher = false;
+    double ambushUntil = -1e9;
+    int zoneLoots = 0;
+    bool inZone = false;
+    double huntHoldUntil = -1e9, huntNoise = -1e9;
+    int watchingBody = -1;
+    double watchStart = -1e9;
+
+    // Healing in safety
+    bool healSpotSet = false;
+    glm::vec3 healSpot{0.0f};
+    double healSince = -1e9;
+
+    // Looting bodies carefully
+    int watchedBody = -1;
+    double watchUntil = -1e9;
+    std::vector<int> myKills;
+    std::vector<std::pair<int, double>> deferredBodies;
 
     // Looting / objectives
     int lootType = 0; // 0 none, 1 container, 2 body, 3 world item
@@ -139,13 +180,25 @@ private:
     Contact& contact(Bot& b, int id);
     Contact* bestThreat(Bot& b, Simulation& sim);
     void moveTo(Bot& b, const glm::vec2& dest, Simulation& sim, bool sprintOk, float stopDist = 0.8f);
+    // Destination with a height: reaches upper floors and roofs by the stairs.
+    void moveTo3(Bot& b, const glm::vec3& dest, Simulation& sim, bool sprintOk, float stopDist = 0.8f);
     void steer(Bot& b, Simulation& sim, const glm::vec2& dir, bool sprint);
     void fight(Bot& b, float dt, Simulation& sim, Contact& c);
     void loot(Bot& b, float dt, Simulation& sim);
     void heal(Bot& b, Simulation& sim);
     void extractGoal(Bot& b, float dt, Simulation& sim);
     void takeLoot(Bot& b, Simulation& sim);
+    // Tactics
+    bool findCoverSpot(Bot& b, Simulation& sim, const glm::vec3& threat, bool wantCloser, bool avoidCurrent, glm::vec3& out, bool& window);
+    bool findHiddenSpot(Bot& b, Simulation& sim, const std::vector<glm::vec3>& threats, float minDist, float maxDist, glm::vec3& out);
+    std::vector<glm::vec3> knownThreats(Bot& b, Simulation& sim, float within, double recent);
+    void setTactic(Bot& b, Tactic t, double now);
+    void manageLight(Bot& b, Simulation& sim, bool fighting, float dist);
     bool chooseLootTarget(Bot& b, Simulation& sim);
     bool wantsExtract(const Bot& b, const Simulation& sim) const;
     bool hasMeds(const Character& c) const;
+public:
+    // Bots that saw their shots land (called by the simulation on a hit).
+    void onHitLanded(int shooter, int victim, Simulation& sim);
+    static float kitPower(const Character& c, bool withHealth = true);
 };

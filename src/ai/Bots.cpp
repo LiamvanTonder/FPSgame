@@ -1,5 +1,6 @@
 #include "ai/Bots.h"
 
+#include "game/Attachments.h"
 #include "game/Simulation.h"
 #include "game/WeaponDefs.h"
 #include "render/Camera.h"
@@ -200,7 +201,14 @@ void BotManager::perceive(Bot& b, Simulation& sim) {
         float stance = o.crouching ? 0.55f : 1.0f;
         float optics = me.weapon.isAiming() && cosA > 0.99f ? 1.0f + me.weapon.magnification() : 1.0f;
         float flash = now - o.lastShot < 0.4 ? 8.0f : 1.0f;
-        float rate = 4.0f * fov * distF * motion * stance * optics * flash * (close ? 4.0f : 1.0f);
+        // A lit weapon light (or a laser beam) gives its owner away; shone in the eyes, it dazzles.
+        float lit = o.weapon.lightOn() ? 3.0f : o.weapon.laserOn() ? 1.8f : 1.0f;
+        if (o.weapon.lightOn() && dist < 25.0f) {
+            glm::vec3 beam = eye - o.weapon.lightEmitter();
+            if (glm::dot(glm::normalize(beam), o.weapon.pointing()) > 0.995f) b.dazzledUntil = now + 0.5;
+        }
+        float dazzle = now < b.dazzledUntil ? 0.5f : 1.0f;
+        float rate = 4.0f * fov * distF * motion * stance * optics * flash * lit * dazzle * (close ? 4.0f : 1.0f);
         c.awareness = std::min(1.5f, c.awareness + rate * dt);
         if (c.awareness >= 1.0f) {
             if (!c.visible) b.reaction = std::max(b.reaction, 0.25f + 0.6f * (1.0f - b.skill));
@@ -209,6 +217,7 @@ void BotManager::perceive(Bot& b, Simulation& sim) {
             c.position = o.chest();
             c.velocity = o.velocity;
             c.uncertainty = 0.0f;
+            c.power = kitPower(o, false); // what they carry is plain to see
         }
     }
 
@@ -246,6 +255,8 @@ void BotManager::perceive(Bot& b, Simulation& sim) {
             }
             c.lastHeard = now;
             c.awareness = std::max(c.awareness, aware);
+            if (e.type == SoundType::Pain) c.lastHurt = now;
+            if (e.type == SoundType::Reload) c.lastReload = now;
         }
     }
     if (b.noises.size() > 24) b.noises.erase(b.noises.begin(), b.noises.begin() + (b.noises.size() - 24));
@@ -331,6 +342,7 @@ bool BotManager::wantsExtract(const Bot& b, const Simulation& sim) const {
     int value = me.equip.totalValue();
     if (backFull && (b.sentBack || b.greed < 0.6f)) return true;
     if (value > 9000 + int(14000 * b.greed) && alive > 120.0) return true;
+    if (b.spawnValue > 0 && value > b.spawnValue * 2.5f + 6000.0f * (1.0f - b.caution) && alive > 90.0) return true;
     if (hp < 0.4f && !hasMeds(me)) return true;
     if (me.weapon.ammo() + spareRounds(me) < 8 && alive > 60.0) return true;
     return alive > 900.0 + 900.0 * b.greed;
@@ -364,6 +376,22 @@ bool BotManager::chooseLootTarget(Bot& b, Simulation& sim) {
         if (c.id < 0 || c.id >= int(sim.chars.size()) || !sim.chars[c.id]->active || !sim.chars[c.id]->dead) continue;
         float d = glm::length(xz(sim.chars[c.id]->chest()) - p);
         if (d > 150.0f) continue;
+        // Bodies draw people: only go when there's been no shooting there for a while and
+        // whoever did it isn't still around.
+        glm::vec3 bodyPos = sim.chars[c.id]->chest();
+        bool deferred = false;
+        for (auto& db : b.deferredBodies) deferred |= db.first == c.id && sim.time - db.second < 30.0;
+        if (deferred) continue;
+        bool mine = std::find(b.myKills.begin(), b.myKills.end(), c.id) != b.myKills.end();
+        double quiet = mine ? 5.0 : 10.0 + 10.0 * b.caution;
+        bool risky = false;
+        for (const Noise& n : b.noises)
+            if (n.importance >= 1.0f && sim.time - n.time < quiet && glm::length(n.position - bodyPos) < 40.0f && n.owner != b.id) risky = true;
+        for (const Contact& k : b.contacts)
+            if (!k.dead && k.id != c.id && k.id >= 0 && k.id < int(sim.chars.size()) && sim.chars[k.id]->alive() &&
+                sim.time - std::max(k.lastSeen, k.lastHeard) < 20.0 && glm::length(k.position - bodyPos) < 35.0f)
+                risky = true;
+        if (risky) continue;
         float s = 4.0f / (d + 10.0f);
         if (s > best) {
             best = s;
@@ -378,6 +406,7 @@ bool BotManager::chooseLootTarget(Bot& b, Simulation& sim) {
         float d = glm::length(xz(c.position) - p);
         if (d > 300.0f) continue;
         float s = (c.hotspot >= 0 ? 3.0f : 1.0f) * (1.0f + c.tier) * (c.type == ContainerType::WeaponCrate ? 2.0f : 1.0f) / (d + 25.0f);
+        if (c.lootZone) s *= b.power > 0.55f ? 2.5f : b.power < 0.35f ? (b.zoneLoots >= 2 ? 0.1f : 1.3f) : 1.6f;
         s *= 0.6f + 0.8f * b.greed;
         if (s > best) {
             best = s;
@@ -396,6 +425,15 @@ void BotManager::think(Bot& b, Simulation& sim) {
     Contact* threat = bestThreat(b, sim);
     bool visible = threat && threat->visible;
     float hp = me.health.totalHp() / me.health.totalMax();
+    b.power = kitPower(me);
+    if (b.spawnValue < 0) {
+        b.spawnValue = me.equip.totalValue();
+        b.ambusher = b.power < 0.4f && sim.map.lootZone.radius > 0.0f && u01(b.rng) < 0.25f;
+    }
+    if (sim.nav.valid() && sim.nav.floorCount() > 0 && sim.nav.levelAt(me.position) > 0) ++sim.stats.botUpstairs;
+    bool inZone = sim.map.inLootZone(me.position);
+    if (inZone && !b.inZone) ++sim.stats.botLootZone;
+    b.inZone = inZone;
     bool meds = hasMeds(me);
     int ammo = me.weapon.ammo() + spareRounds(me);
     Goal g;
@@ -403,6 +441,8 @@ void BotManager::think(Bot& b, Simulation& sim) {
     double sinceDamage = now - b.lastDamaged;
     bool treatable = me.health.bleeding() || me.health.anyFracture() || hp < 0.6f || me.health.pain() > 0.6f;
     if (me.health.heavyBleeding() && meds && (!visible || hp < 0.35f)) g = Goal::Heal;
+    // Hurt in a fight: get out of sight and patch up rather than trade shots while bleeding.
+    else if (threat && meds && !visible && now - threat->lastSeen > 1.5 && (me.health.bleeding() || hp < 0.5f) && sinceDamage > 1.0) g = Goal::Heal;
     else if (threat && (visible || now - threat->lastSeen < 8.0 || (now - threat->lastHeard < 5.0 && glm::length(threat->position - me.eye()) < 80.0f) ||
                         sinceDamage < 4.0)) {
         bool outgunned = (hp < 0.35f && b.aggression < 0.6f) || ammo == 0 || !me.weapon.hasWeapon();
@@ -416,7 +456,8 @@ void BotManager::think(Bot& b, Simulation& sim) {
         const Noise* lure = nullptr;
         for (const Noise& n : b.noises)
             if (n.importance >= 0.8f && now - n.time < 25.0 && glm::length(n.position - me.position) < 320.0f) lure = &n;
-        if (lure && b.aggression + 0.3f * b.greed > 0.6f) g = Goal::Hunt;
+        // A fight between others: the well-armed and the bold go and take advantage; the poorly armed stay away.
+        if (lure && b.aggression + 0.3f * b.greed + (b.power - 0.5f) > 0.6f && b.power > 0.35f) g = Goal::Hunt;
         else if (b.lootType != 0 || chooseLootTarget(b, sim)) g = Goal::Loot;
         else g = Goal::Roam;
     }
@@ -426,6 +467,14 @@ void BotManager::think(Bot& b, Simulation& sim) {
         b.wantPath = true;
         b.peeking = false;
         if (g != Goal::Fight && g != Goal::Heal) b.hasCover = false;
+        if (g == Goal::Fight) {
+            setTactic(b, Tactic::Engage, now);
+            b.engageSince = now;
+            b.hasCover = false;
+            b.coverTime = -1e9;
+            b.peeks = 0;
+        }
+        if (g == Goal::Heal) b.healSpotSet = false;
         if (g != Goal::Loot) me.cancelAction();
     }
     b.target = threat ? threat->id : -1;
@@ -452,36 +501,83 @@ void BotManager::steer(Bot& b, Simulation& sim, const glm::vec2& dir, bool sprin
 }
 
 void BotManager::moveTo(Bot& b, const glm::vec2& dest, Simulation& sim, bool sprintOk, float stopDist) {
+    moveTo3(b, glm::vec3(dest.x, -1.0e4f, dest.y), sim, sprintOk, stopDist); // ground level
+}
+
+void BotManager::moveTo3(Bot& b, const glm::vec3& dest3, Simulation& sim, bool sprintOk, float stopDist) {
     Character& me = *sim.chars[b.id];
     glm::vec2 p = xz(me.position);
-    float toDest = glm::length(dest - p);
+    glm::vec2 dest = xz(dest3);
+    // On another level (upstairs, roof): not there yet, however close it looks from below.
+    bool otherLevel = sim.nav.valid() && sim.nav.floorCount() > 0 && sim.nav.levelAt(me.position) != sim.nav.levelAt(dest3);
+    float toDest = glm::length(dest - p) + (otherLevel ? 8.0f : 0.0f);
     if (toDest < stopDist) {
         b.path.clear();
         b.debug = "arrived";
         return;
     }
     bool finished = b.pathIndex >= b.path.size();
-    float moved = glm::length(dest - b.destination);
+    float moved = glm::length(dest - xz(b.destination)) + (b.destination.x > 1e8f ? 1e9f : 0.0f);
     if (moved > 4.0f || (moved > 1.0f && sim.time - b.pathTime > 1.5) || sim.time - b.pathTime > 20.0 || (finished && sim.time - b.pathTime > 1.5))
         b.wantPath = true;
     if (b.wantPath && pathBudget > 0) {
         --pathBudget;
         b.wantPath = false;
-        b.destination = dest;
+        b.destination = dest3;
         b.pathTime = sim.time;
         b.pathIndex = 0;
-        if (!sim.nav.valid() || !sim.nav.findPath(p, dest, b.path)) b.path = {dest};
+        glm::vec3 to = dest3;
+        if (to.y < -1000.0f) to.y = sim.nav.valid() ? sim.nav.levelHeight(glm::vec3(dest.x, -1.0e4f, dest.y)) : 0.0f;
+        // Away from enemy eyes: ground they can see costs a lot more (worked out lazily, 3 m cells).
+        std::vector<glm::vec3> threats;
+        if (b.hiddenRoute) threats = knownThreats(b, sim, 150.0f, 20.0);
+        b.hiddenRoute = false;
+        std::vector<int8_t> vis;
+        glm::vec2 origin = glm::min(p, dest) - glm::vec2(30.0f);
+        const float cell = 3.0f;
+        int gw = 0, gh = 0;
+        if (!threats.empty()) {
+            glm::vec2 size = glm::abs(dest - p) + glm::vec2(60.0f);
+            gw = std::min(80, int(size.x / cell) + 1);
+            gh = std::min(80, int(size.y / cell) + 1);
+            vis.assign(size_t(gw) * gh, -1);
+            sim.nav.extraCost = [&](float x, float z) {
+                int ix = int((x - origin.x) / cell), iz = int((z - origin.y) / cell);
+                if (ix < 0 || iz < 0 || ix >= gw || iz >= gh) return 1.0f;
+                int8_t& v = vis[size_t(iz) * gw + ix];
+                if (v < 0) {
+                    glm::vec2 c = origin + glm::vec2((ix + 0.5f) * cell, (iz + 0.5f) * cell);
+                    float y = sim.map.hasTerrain ? sim.terrain.height(c.x, c.y) : me.position.y;
+                    v = 0;
+                    for (const glm::vec3& t : threats)
+                        if (lineOfSight(sim, glm::vec3(c.x, y + 1.3f, c.y), t, me.id, -2)) {
+                            v = 1;
+                            break;
+                        }
+                }
+                return v ? 5.0f : 1.0f;
+            };
+        }
+        if (!sim.nav.valid() || !sim.nav.findPath3(me.position, to, b.path)) b.path = {to};
+        sim.nav.extraCost = nullptr;
     }
     while (b.pathIndex < b.path.size()) {
-        float d = glm::length(b.path[b.pathIndex] - p);
+        float d = glm::length(xz(b.path[b.pathIndex]) - p);
         bool last = b.pathIndex + 1 >= b.path.size();
+        bool climb = std::abs(b.path[b.pathIndex].y - me.position.y) > 0.8f; // a stair head: get up there first
         // Corners (doorways) must actually be reached; skip only when the next leg is clear from here.
-        if (d < 0.3f || (d < 1.5f && !last && sim.nav.clearLine(p, b.path[b.pathIndex + 1])) || (last && d < 0.7f)) ++b.pathIndex;
-        else break;
+        if (climb) {
+            if (d < 0.35f) ++b.pathIndex;
+            else break;
+        } else if (d < 0.3f || (d < 1.5f && !last && sim.nav.clearLine3(me.position, b.path[b.pathIndex + 1])) || (last && d < 0.7f)) {
+            ++b.pathIndex;
+        } else {
+            break;
+        }
     }
     glm::vec2 wp;
     if (b.pathIndex < b.path.size()) {
-        wp = b.path[b.pathIndex];
+        wp = xz(b.path[b.pathIndex]);
         b.debug = "path";
     } else if (toDest < 6.0f && b.allowFinal) {
         // End of the walkable route: the last step to an object standing in a blocked cell.
@@ -498,8 +594,9 @@ void BotManager::moveTo(Bot& b, const glm::vec2& dest, Simulation& sim, bool spr
     }
     // Look ahead around the corner so the route is a curve, not a zig-zag.
     glm::vec2 dir = wp - p;
-    if (b.pathIndex + 1 < b.path.size() && glm::length(dir) < 2.5f && sim.nav.clearLine(p, b.path[b.pathIndex + 1])) {
-        glm::vec2 next = b.path[b.pathIndex + 1] - p;
+    if (b.pathIndex + 1 < b.path.size() && glm::length(dir) < 2.5f && std::abs(b.path[b.pathIndex + 1].y - me.position.y) < 0.8f &&
+        sim.nav.clearLine3(me.position, b.path[b.pathIndex + 1])) {
+        glm::vec2 next = xz(b.path[b.pathIndex + 1]) - p;
         float w = 1.0f - glm::length(dir) / 2.5f;
         dir = glm::normalize(dir + 1e-4f) * (1.0f - w) + glm::normalize(next + 1e-4f) * w;
     }
@@ -535,7 +632,7 @@ void BotManager::moveTo(Bot& b, const glm::vec2& dest, Simulation& sim, bool spr
             b.unstickDir = -fwd * 0.6f + glm::vec2(-fwd.y, fwd.x) * side;
             b.unstickUntil = sim.time + 0.7 + 0.5 * u01(b.rng);
             b.wantPath = true;
-            b.destination = glm::vec2(1e9f);
+            b.destination = glm::vec3(1e9f);
             b.debug = "stuck";
             if (b.stuckCount > 3) {
                 // Give up on this objective.
@@ -554,6 +651,204 @@ void BotManager::moveTo(Bot& b, const glm::vec2& dest, Simulation& sim, bool spr
     }
 }
 
+// ------------------------------------------------------------------ tactics
+
+float BotManager::kitPower(const Character& c, bool withHealth) {
+    // The gun: its class and quality. What others can see is the gun and the armour.
+    const Item* gun = c.weapon.item();
+    for (int s : {ES_Hand0, ES_Hand1})
+        if (!gun && c.equip.slots[s] && c.equip.slots[s]->d().cat == ItemCat::Weapon) gun = c.equip.slots[s].get();
+    float weapon = 0.05f;
+    if (gun) {
+        const WeaponDef& d = gun->weaponDef();
+        switch (d.cls) {
+        case WeaponClass::Pistol: weapon = 0.25f; break;
+        case WeaponClass::Smg: case WeaponClass::Shotgun: weapon = 0.5f; break;
+        case WeaponClass::Rifle: weapon = 0.72f; break;
+        case WeaponClass::Lmg: weapon = 0.8f; break;
+        case WeaponClass::Marksman: weapon = 0.75f; break;
+        case WeaponClass::Sniper: weapon = 0.7f; break;
+        }
+        weapon += std::min(0.2f, float(d.value) / 40000.0f);
+        if (withHealth && loadedRounds(*gun) + c.equip.roundsAvailable(d.caliber) < 15) weapon *= 0.6f;
+    }
+    float armor = 0.0f;
+    if (const ItemPtr& a = c.equip.slots[ES_Armor])
+        armor += a->d().armorClass / 4.0f * std::clamp(a->condition / std::max(1.0f, a->d().durability), 0.0f, 1.0f) * 0.6f;
+    if (const ItemPtr& h = c.equip.slots[ES_Helmet])
+        armor += h->d().armorClass / 3.0f * std::clamp(h->condition / std::max(1.0f, h->d().durability), 0.0f, 1.0f) * 0.4f;
+    float hp = withHealth ? c.health.totalHp() / std::max(1.0f, c.health.totalMax()) : 1.0f;
+    return std::clamp(0.6f * weapon + 0.25f * armor + 0.15f * hp, 0.0f, 1.0f);
+}
+
+void BotManager::onHitLanded(int shooter, int victim, Simulation& sim) {
+    Bot* b = find(shooter);
+    if (!b) return;
+    contact(*b, victim).lastHurt = sim.time;
+}
+
+void BotManager::setTactic(Bot& b, Tactic t, double now) {
+    if (b.tactic == t) return;
+    b.tactic = t;
+    b.tacticSince = now;
+    b.tacticPoint = glm::vec3(1e9f);
+    b.wantPath = true;
+}
+
+std::vector<glm::vec3> BotManager::knownThreats(Bot& b, Simulation& sim, float within, double recent) {
+    std::vector<glm::vec3> out;
+    Character& me = *sim.chars[b.id];
+    for (const Contact& c : b.contacts) {
+        if (c.dead || c.id < 0 || c.id >= int(sim.chars.size()) || !sim.chars[c.id]->alive()) continue;
+        double age = sim.time - std::max(c.lastSeen, c.lastHeard);
+        if (age > recent || c.awareness < 0.35f) continue;
+        if (glm::length(c.position - me.eye()) > within) continue;
+        out.push_back(c.position);
+        if (out.size() >= 3) break;
+    }
+    return out;
+}
+
+// Spots near cover that hide a crouched body from the threat; better if a standing or leaning
+// shooter can see out, at a sensible range, and not toward the enemy. Upstairs windows count.
+bool BotManager::findCoverSpot(Bot& b, Simulation& sim, const glm::vec3& threat, bool wantCloser, bool avoidCurrent, glm::vec3& out,
+                               bool& window) {
+    Character& me = *sim.chars[b.id];
+    float dist = glm::length(threat - me.eye());
+    float ideal = std::clamp(effectiveRange(me.weapon.def()) * 0.45f, 12.0f, 70.0f);
+    struct Cand {
+        glm::vec3 p;
+        bool win;
+        float pre;
+    };
+    std::vector<Cand> cands;
+    if (sim.nav.valid()) {
+        std::vector<NavGrid::Cover> covers;
+        sim.nav.findCover(xz(me.position), xz(threat), 28.0f, covers, 24);
+        for (const NavGrid::Cover& cv : covers) {
+            float y = sim.map.hasTerrain ? sim.terrain.height(cv.position.x, cv.position.y) : me.position.y;
+            cands.push_back({glm::vec3(cv.position.x, y, cv.position.y), false, 0.0f});
+        }
+    }
+    for (const FiringSpot& fs : sim.map.firingSpots) {
+        if (glm::length(xz(fs.position - me.position)) > 32.0f) continue;
+        glm::vec2 toT = xz(threat - fs.position);
+        if (glm::length(toT) < 1.0f || glm::dot(fs.facing, glm::normalize(toT)) < 0.35f) continue;
+        cands.push_back({fs.position, true, 0.0f});
+    }
+    glm::vec3 toThreat = threat - me.position;
+    for (Cand& c : cands) {
+        float dMe = glm::length(c.p - me.position), dT = glm::length(threat - c.p);
+        c.pre = -dMe * 0.6f - std::abs(dT - ideal) * 0.08f;
+        if (c.win) c.pre += 3.0f + 0.3f * std::clamp(c.p.y - threat.y + 1.3f, 0.0f, 8.0f);
+        if (wantCloser && dT > dist * 0.75f) c.pre -= 20.0f;
+        if (avoidCurrent && glm::length(xz(c.p) - b.lastCover) < 2.5f) c.pre -= 100.0f;
+        if (dT < 6.0f) c.pre -= 30.0f;
+        if (!wantCloser && glm::dot(c.p - me.position, toThreat) > 0.0f && dT < dist * 0.5f) c.pre -= 8.0f;
+    }
+    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& c) { return a.pre > c.pre; });
+    float best = -1e9f;
+    bool found = false;
+    int tried = 0;
+    for (const Cand& c : cands) {
+        if (++tried > 10) break;
+        if (c.pre < -60.0f) break;
+        glm::vec3 d = glm::normalize(glm::vec3(threat.x - c.p.x, 0.0f, threat.z - c.p.z) + glm::vec3(1e-4f));
+        glm::vec3 side(-d.z, 0.0f, d.x);
+        bool canShoot = lineOfSight(sim, c.p + glm::vec3(0, 1.62f, 0), threat, me.id, -2) ||
+                        lineOfSight(sim, c.p + glm::vec3(0, 1.5f, 0) + side * 0.45f, threat, me.id, -2) ||
+                        lineOfSight(sim, c.p + glm::vec3(0, 1.5f, 0) - side * 0.45f, threat, me.id, -2);
+        glm::vec3 hideAt = c.p;
+        if (c.win) {
+            // At a window you hide beside it, behind the wall.
+            if (!canShoot) continue;
+            bool ok = false;
+            for (float s : {0.9f, -0.9f}) {
+                glm::vec3 q = c.p + glm::vec3(-d.z, 0.0f, d.x) * s - d * 0.3f;
+                if (!sim.nav.walkable3(q)) continue;
+                if (!lineOfSight(sim, q + glm::vec3(0, 1.15f, 0), threat, me.id, -2) && !lineOfSight(sim, q + glm::vec3(0, 1.6f, 0), threat, me.id, -2)) {
+                    hideAt = q;
+                    ok = true;
+                    break;
+                }
+            }
+            if (!ok) continue;
+        } else if (lineOfSight(sim, c.p + glm::vec3(0, 1.15f, 0), threat, me.id, -2) || lineOfSight(sim, c.p + glm::vec3(0, 0.6f, 0), threat, me.id, -2)) {
+            continue; // not actually covered from there
+        }
+        float score = c.pre + (canShoot ? 5.0f : 0.0f);
+        if (score > best) {
+            best = score;
+            out = c.win ? c.p : hideAt;
+            window = c.win;
+            b.tacticPoint = hideAt; // where to duck back to
+            found = true;
+        }
+    }
+    return found;
+}
+
+// Somewhere none of the threats can see, preferably further from them.
+bool BotManager::findHiddenSpot(Bot& b, Simulation& sim, const std::vector<glm::vec3>& threats, float minDist, float maxDist, glm::vec3& out) {
+    Character& me = *sim.chars[b.id];
+    bool upstairs = sim.nav.valid() && sim.nav.levelAt(me.position) > 0;
+    float best = -1e9f;
+    bool found = false;
+    glm::vec2 away(0.0f);
+    for (const glm::vec3& t : threats) away += glm::normalize(xz(me.position - t) + glm::vec2(1e-4f));
+    if (glm::length(away) > 1e-3f) away = glm::normalize(away);
+    for (int r = 0; r < 3; ++r) {
+        float rad = minDist + (maxDist - minDist) * (r + 0.5f) / 3.0f;
+        for (int k = 0; k < 12; ++k) {
+            float a = k / 12.0f * 6.2832f + u11(b.rng) * 0.2f;
+            glm::vec2 q = xz(me.position) + glm::vec2(std::cos(a), std::sin(a)) * rad;
+            glm::vec3 p;
+            if (upstairs) {
+                p = glm::vec3(q.x, me.position.y, q.y);
+                if (!sim.nav.walkable3(p)) continue;
+            } else {
+                glm::vec2 w;
+                if (!sim.nav.valid() || !sim.nav.nearestWalkable(q, w, 3)) continue;
+                p = glm::vec3(w.x, sim.map.hasTerrain ? sim.terrain.height(w.x, w.y) : me.position.y, w.y);
+            }
+            float score = glm::dot(glm::normalize(q - xz(me.position)), away) * 6.0f - rad * 0.15f;
+            if (score <= best) continue;
+            bool hidden = true;
+            for (const glm::vec3& t : threats)
+                if (lineOfSight(sim, p + glm::vec3(0, 1.2f, 0), t, me.id, -2) || lineOfSight(sim, p + glm::vec3(0, 1.65f, 0), t, me.id, -2)) {
+                    hidden = false;
+                    break;
+                }
+            if (!hidden) continue;
+            best = score;
+            out = p;
+            found = true;
+        }
+    }
+    return found;
+}
+
+void BotManager::manageLight(Bot& b, Simulation& sim, bool fighting, float dist) {
+    Character& me = *sim.chars[b.id];
+    Item* it = me.weapon.item();
+    if (!it) return;
+    int light = me.weapon.def().light;
+    if (!light) return;
+    bool indoors = false;
+    {
+        WorldHit hit;
+        SegmentQuery q;
+        q.ignoreOwner = me.id;
+        indoors = sim.world.segment(me.eye(), me.eye() + glm::vec3(0, 4.0f, 0), hit, q) && sim.world.collider(hit.collider).owner == kOwnerWorld;
+    }
+    bool quiet = knownThreats(b, sim, 80.0f, 30.0).empty();
+    bool want = false;
+    if ((light & 2) && fighting && dist < 25.0f) want = true;                       // laser up close
+    if ((light & 1) && indoors && (quiet || (fighting && dist < 12.0f))) want = true; // light to clear rooms
+    if (fighting && (light & 1) && !(light & 2) && dist > 12.0f) want = false;      // a lit light gives you away
+    if (want != it->lightOn) b.input.weapon.toggleLight = true;
+}
+
 void BotManager::fight(Bot& b, float dt, Simulation& sim, Contact& c) {
     Character& me = *sim.chars[b.id];
     Character& t = *sim.chars[c.id];
@@ -565,104 +860,262 @@ void BotManager::fight(Bot& b, float dt, Simulation& sim, Contact& c) {
     float range = effectiveRange(wd);
     bool underFire = now - b.lastDamaged < 2.5 || me.suppression > 0.5f;
 
-    // Reloading: empty, or low and nobody in sight.
-    bool reload = me.weapon.hasWeapon() && !me.weapon.isReloading() && !me.weapon.isHandLoading() &&
-                  (me.weapon.ammo() == 0 || (!visible && me.weapon.ammo() < me.weapon.capacity() * 0.4f));
-    if (reload) b.input.weapon.reloadPressed = true;
-    // Out of ammunition for this gun: the other one.
-    if (me.weapon.hasWeapon() && me.weapon.ammo() == 0 && spareRounds(me) == 0) {
-        int other = 1 - me.weapon.hand();
-        if (me.equip.slots[other]) b.input.weapon.selectWeapon = other;
+    // ----- the gun: reload, or go to the sidearm when it's empty and they're close
+    int other = 1 - me.weapon.hand();
+    bool otherLoaded = me.equip.slots[other] && me.equip.slots[other]->d().cat == ItemCat::Weapon && loadedRounds(*me.equip.slots[other]) > 0;
+    bool empty = me.weapon.hasWeapon() && me.weapon.ammo() == 0;
+    if (empty && otherLoaded && (dist < 20.0f || spareRounds(me) == 0) && !me.weapon.isSwitching()) {
+        b.input.weapon.selectWeapon = other;
+    } else {
+        bool reload = me.weapon.hasWeapon() && !me.weapon.isReloading() && !me.weapon.isHandLoading() &&
+                      (me.weapon.ammo() == 0 || (!visible && me.weapon.ammo() < me.weapon.capacity() * 0.4f));
+        if (reload) {
+            b.input.weapon.reloadPressed = true;
+            if (visible && !b.hasCover) b.coverTime = -1e9; // get behind something to reload
+        }
     }
-    if (!me.weapon.hasWeapon()) {
-        int other = 1 - me.weapon.hand();
-        if (me.equip.slots[other]) b.input.weapon.selectWeapon = other;
+    if (!me.weapon.hasWeapon() && me.equip.slots[other]) b.input.weapon.selectWeapon = other;
+
+    // ----- what kind of fight this is
+    bool wounded = now - c.lastHurt < 8.0, reloading = now - c.lastReload < 2.5;
+    bool outmatched = (b.power < c.power - 0.25f || (b.power < 0.35f && dist > 35.0f)) && !wounded && !reloading;
+    if (glm::length(c.position - c.seenAt) > 2.5f || c.seenAt.x > 1e8f) {
+        c.seenAt = c.position;
+        c.stillSince = now;
+    }
+    switch (b.tactic) {
+    case Tactic::Engage:
+        if (outmatched && dist > 15.0f && now - b.tacticSince > 1.0) {
+            setTactic(b, Tactic::Withdraw, now);
+            ++sim.stats.botWithdrawals;
+        } else if ((wounded || reloading || b.power > c.power + 0.3f) && b.aggression + (wounded ? 0.3f : 0.0f) > 0.55f && dist > 10.0f &&
+                   dist < range && now - b.tacticSince > 2.0) {
+            setTactic(b, Tactic::Push, now);
+            ++sim.stats.botPushes;
+        } else if (now - c.stillSince > 8.0 + 7.0 * b.caution && now - b.lastFlank > 30.0 && now - b.lastDamaged > 4.0 &&
+                   (b.aggression > 0.5f || b.power > c.power + 0.15f) && dist < range * 0.9f && dist > 15.0f && now - b.tacticSince > 3.0) {
+            setTactic(b, Tactic::Flank, now);
+            b.lastFlank = now;
+            ++sim.stats.botFlanks;
+        } else if (!visible && now - c.lastSeen > 5.0 && now - b.lastDamaged > 3.0 && now - b.tacticSince > 2.0) {
+            setTactic(b, Tactic::Search, now);
+        }
+        break;
+    case Tactic::Push:
+        if (now - b.tacticSince > 12.0 || (!wounded && !reloading && b.power <= c.power + 0.3f && now - b.tacticSince > 4.0) || underFire)
+            setTactic(b, Tactic::Engage, now);
+        break;
+    case Tactic::Flank:
+        if (now - b.tacticSince > 30.0 || (visible && dist < 25.0f) || underFire) setTactic(b, Tactic::Engage, now);
+        break;
+    case Tactic::Withdraw:
+        if (now - b.tacticSince > 20.0 || (dist < 10.0f && visible)) setTactic(b, Tactic::Engage, now);
+        break;
+    case Tactic::Search:
+        if (visible || underFire) setTactic(b, Tactic::Engage, now);
+        break;
     }
 
-    // ----- positioning
-    bool wantCover = (underFire || me.weapon.isReloading() || reload || dist < range * 0.9f) && b.caution + (underFire ? 0.5f : 0.0f) > 0.35f;
-    if (wantCover && !b.hasCover && now - b.coverTime > 2.0) {
-        std::vector<NavGrid::Cover> covers;
-        sim.nav.findCover(xz(me.position), xz(c.position), 22.0f, covers, 12);
-        for (const NavGrid::Cover& cv : covers) {
-            float gy = sim.terrain.height(cv.position.x, cv.position.y);
-            if (sim.map.hasTerrain == false) gy = me.position.y;
-            glm::vec3 low(cv.position.x, gy + 1.0f, cv.position.y);
-            if (lineOfSight(sim, low, c.position, me.id, c.id)) continue; // not actually covered
-            b.hasCover = true;
-            b.cover = cv.position;
-            b.coverTime = now;
-            b.peeking = false;
-            b.phaseUntil = now + 1.0 + u01(b.rng) * 1.5;
-            break;
-        }
-        if (!b.hasCover) b.coverTime = now; // try again later
-    }
     bool crouch = false;
     float lean = 0.0f;
-    if (b.hasCover) {
-        float toCover = glm::length(b.cover - xz(me.position));
-        if (toCover > 0.9f) {
-            moveTo(b, b.cover, sim, toCover > 5.0f, 0.5f);
-            if (toCover > 30.0f) b.hasCover = false;
-        } else {
-            b.input.move = glm::vec2(0.0f);
-            if (!b.peeking) {
-                crouch = true;
-                if (now > b.phaseUntil && !me.weapon.isReloading() && now - b.lastDamaged > 1.0) {
-                    // Find a way to see out: stand up, or lean around the edge.
-                    glm::vec3 base(me.position.x, me.position.y, me.position.z);
-                    glm::vec3 right = me.right();
-                    b.peekStand = lineOfSight(sim, base + glm::vec3(0, 1.66f, 0), c.position, me.id, c.id);
-                    b.peekLean = 0.0f;
-                    if (!b.peekStand) {
-                        for (float side : {1.0f, -1.0f})
-                            if (lineOfSight(sim, base + glm::vec3(0, 1.55f, 0) + right * (0.45f * side), c.position, me.id, c.id)) {
-                                b.peekLean = side;
-                                break;
-                            }
-                        if (b.peekLean == 0.0f) b.peekStand = true; // just stand and look
+    float toCover = 1e9f;
+    auto coverPos = [&]() { return glm::vec3(b.cover.x, b.coverY, b.cover.y); };
+    auto distTo = [&](const glm::vec3& p) {
+        return glm::length(xz(p) - xz(me.position)) + (std::abs(p.y - me.position.y) > 1.6f ? 6.0f : 0.0f);
+    };
+
+    if (b.tactic == Tactic::Withdraw || b.tactic == Tactic::Flank || b.tactic == Tactic::Search) {
+        // Moves along routes the enemy can't see.
+        if (b.tacticPoint.x > 1e8f) {
+            glm::vec3 p;
+            bool ok = false;
+            if (b.tactic == Tactic::Withdraw) {
+                ok = findHiddenSpot(b, sim, knownThreats(b, sim, 150.0f, 15.0), 18.0f, 40.0f, p);
+            } else if (b.tactic == Tactic::Flank) {
+                // Round the side, 70-110 degrees off the line between us, a bit closer than now.
+                glm::vec2 from = xz(me.position - c.position);
+                float r0 = std::clamp(glm::length(from) * 0.7f, 12.0f, range * 0.6f);
+                float base = std::atan2(from.y, from.x);
+                for (int k = 0; k < 6 && !ok; ++k) {
+                    float off = (1.22f + 0.35f * u01(b.rng)) * (k % 2 == 0 ? 1.0f : -1.0f) * (b.strafeSide >= 0.0f ? 1.0f : -1.0f);
+                    glm::vec2 q = xz(c.position) + glm::vec2(std::cos(base + off), std::sin(base + off)) * r0;
+                    glm::vec2 w;
+                    if (sim.nav.valid() && sim.nav.nearestWalkable(q, w, 6)) {
+                        p = glm::vec3(w.x, sim.map.hasTerrain ? sim.terrain.height(w.x, w.y) : me.position.y, w.y);
+                        ok = true;
                     }
-                    b.peeking = true;
-                    b.phaseUntil = now + 1.5 + u01(b.rng) * (1.0 + 2.0 * b.aggression);
                 }
             } else {
-                crouch = !b.peekStand;
-                lean = b.peekLean;
-                if (now > b.phaseUntil || now - b.lastDamaged < 0.3) {
-                    b.peeking = false;
-                    b.phaseUntil = now + 0.8 + u01(b.rng) * 2.0 * b.caution;
-                    if (u01(b.rng) < 0.25f + 0.3f * b.aggression) b.hasCover = false; // move to another position
+                // Search: a vantage point short of where they were.
+                glm::vec3 to = c.position - me.position;
+                float l = glm::length(xz(to));
+                glm::vec3 q = c.position - glm::vec3(to.x, 0, to.z) / std::max(l, 0.1f) * std::min(8.0f, l);
+                p = glm::vec3(q.x, c.position.y - 1.3f, q.z);
+                ok = true;
+            }
+            if (ok) {
+                b.tacticPoint = p;
+                b.hiddenRoute = true;
+                b.wantPath = true;
+            } else {
+                setTactic(b, Tactic::Engage, now);
+            }
+        }
+        if (b.tacticPoint.x < 1e8f) {
+            float d = distTo(b.tacticPoint);
+            bool sprint = b.tactic == Tactic::Withdraw || (b.tactic == Tactic::Flank && d > 10.0f);
+            if (d > 1.5f) {
+                b.allowFinal = false;
+                moveTo3(b, b.tacticPoint, sim, sprint, 1.2f);
+                if (b.tactic == Tactic::Search && glm::length(xz(c.position - me.position)) < 18.0f) crouch = true;
+            } else if (b.tactic == Tactic::Search) {
+                c.awareness = std::min(c.awareness, 0.3f); // nobody here any more
+                setTactic(b, Tactic::Engage, now);
+            } else {
+                b.hasCover = false;
+                setTactic(b, Tactic::Engage, now);
+            }
+        }
+    } else {
+        // Engage / push: fight from cover, never stand about in the open.
+        bool wantCloser = b.tactic == Tactic::Push;
+        if (b.hasCover) {
+            toCover = distTo(b.peeking && b.coverIsWindow ? coverPos() : b.tacticPoint.x < 1e8f ? b.tacticPoint : coverPos());
+            if (wantCloser && toCover < 1.2f && now - b.coverTime > 2.0) b.hasCover = false; // next cover forward
+        }
+        if (!b.hasCover && now - b.coverTime > 0.6) {
+            glm::vec3 spot;
+            bool window = false;
+            if (findCoverSpot(b, sim, c.position, wantCloser, b.peeks >= b.peekLimit || wantCloser, spot, window)) {
+                b.hasCover = true;
+                b.cover = xz(spot);
+                b.coverY = spot.y;
+                b.coverIsWindow = window;
+                b.coverTime = now;
+                b.peeking = false;
+                b.peeks = 0;
+                b.peekLimit = 2 + int(u01(b.rng) * 3.0f);
+                b.phaseUntil = now + 0.5 + u01(b.rng);
+                b.wantPath = true;
+            } else {
+                b.coverTime = now;
+                if (wantCloser && dist < 18.0f) {
+                    moveTo(b, xz(c.position), sim, false, 4.0f); // close enough: just go
+                } else if (visible && b.tacticPoint.x > 1e8f) {
+                    // Nothing to hide behind here: break line of sight.
+                    glm::vec3 p;
+                    if (findHiddenSpot(b, sim, {c.position}, 5.0f, 22.0f, p)) {
+                        b.tacticPoint = p;
+                        b.hiddenRoute = true;
+                        b.wantPath = true;
+                    }
                 }
             }
         }
-    } else if (visible) {
-        if (dist > range * 0.85f) moveTo(b, xz(c.position), sim, false, 5.0f); // close in
-        else {
-            // Hold and shoot; strafe a little to be harder to hit.
+        if (b.hasCover) {
+            glm::vec3 hide = b.tacticPoint.x < 1e8f ? b.tacticPoint : coverPos();
+            glm::vec3 at = b.peeking && b.coverIsWindow ? coverPos() : (b.coverIsWindow ? hide : coverPos());
+            toCover = distTo(at);
+            if (toCover > 0.8f) {
+                moveTo3(b, at, sim, toCover > 4.0f, 0.4f);
+                if (toCover > 40.0f) b.hasCover = false;
+            } else {
+                b.input.move = glm::vec2(0.0f);
+                if (!b.peeking) {
+                    crouch = true;
+                    // Flanked? This spot no longer hides us from them.
+                    if (now > b.flankCheck) {
+                        b.flankCheck = now + 0.5;
+                        glm::vec3 base = me.position;
+                        if (lineOfSight(sim, base + glm::vec3(0, 1.15f, 0), c.position, me.id, c.id) && now - b.coverTime > 1.0) {
+                            b.lastCover = b.cover;
+                            b.hasCover = false;
+                            b.peeks = b.peekLimit;
+                        }
+                    }
+                    if (b.hasCover && now > b.phaseUntil && !me.weapon.isReloading() && now - b.lastDamaged > 1.0) {
+                        // Find a way to see out: stand up, or lean round the edge (at a window: step into it).
+                        glm::vec3 base = me.position;
+                        glm::vec3 right = me.right();
+                        b.peekStand = b.coverIsWindow || lineOfSight(sim, base + glm::vec3(0, 1.66f, 0), c.position, me.id, c.id);
+                        b.peekLean = 0.0f;
+                        if (!b.peekStand) {
+                            for (float side : {1.0f, -1.0f})
+                                if (lineOfSight(sim, base + glm::vec3(0, 1.55f, 0) + right * (0.45f * side), c.position, me.id, c.id)) {
+                                    b.peekLean = side;
+                                    break;
+                                }
+                            if (b.peekLean == 0.0f) b.peekStand = true;
+                        }
+                        b.peeking = true;
+                        ++b.peeks;
+                        b.phaseUntil = now + 1.5 + u01(b.rng) * (1.0 + 2.0 * b.aggression);
+                    }
+                } else {
+                    crouch = !b.peekStand;
+                    lean = b.peekLean;
+                    if (now > b.phaseUntil || now - b.lastDamaged < 0.3) {
+                        b.peeking = false;
+                        b.phaseUntil = now + 0.8 + u01(b.rng) * 2.0 * b.caution;
+                        if (b.peeks >= b.peekLimit) {
+                            b.lastCover = b.cover; // reposition: somewhere else next
+                            b.hasCover = false;
+                        }
+                    }
+                }
+            }
+        } else if (b.tacticPoint.x < 1e8f) {
+            float d = distTo(b.tacticPoint);
+            if (d > 1.0f) moveTo3(b, b.tacticPoint, sim, true, 0.8f);
+            else b.tacticPoint = glm::vec3(1e9f);
+            crouch = d < 1.0f;
+        } else if (visible) {
+            // Last resort: low and moving, never standing still in the open.
             if (now > b.strafeUntil) {
                 b.strafeSide = u01(b.rng) < 0.5f ? -1.0f : 1.0f;
-                if (u01(b.rng) < 0.3f) b.strafeSide = 0.0f; // sometimes just hold still and aim
-                b.strafeUntil = now + 1.0 + 2.0 * u01(b.rng);
+                b.strafeUntil = now + 0.8 + 1.5 * u01(b.rng);
             }
-            float side = b.strafeSide;
             glm::vec2 toT = glm::normalize(xz(c.position - me.position) + glm::vec2(1e-4f));
-            steer(b, sim, glm::vec2(-toT.y, toT.x) * side * (dist > 25.0f ? 0.5f : 1.0f), false);
-            bool wantCrouch = dist > 50.0f && b.caution > 0.4f;
-            if (now > b.crouchUntil && wantCrouch != b.crouchHeld) {
-                b.crouchHeld = wantCrouch;
-                b.crouchUntil = now + 1.0 + u01(b.rng);
-            }
-            crouch = b.crouchHeld;
+            steer(b, sim, glm::vec2(-toT.y, toT.x) * b.strafeSide - (outmatched ? toT * 0.6f : glm::vec2(0.0f)), false);
+            crouch = dist > 25.0f;
+        } else {
+            float d = glm::length(xz(c.position - me.position));
+            if (d > 3.0f) moveTo(b, xz(c.position), sim, false, 2.0f);
         }
-    } else {
-        // Lost them: go to where they were, carefully.
-        float d = glm::length(xz(c.position - me.position));
-        if (d > 3.0f) moveTo(b, xz(c.position), sim, d > 60.0f && b.aggression > 0.6f, 2.0f);
-        else c.awareness = std::min(c.awareness, 0.4f); // nobody here any more
     }
     b.input.crouch = crouch;
     b.input.lean = lean;
+
+    // Stats: standing in the open with them in view.
+    bool inCover = b.hasCover && toCover < 1.2f;
+    bool exposed = visible && !inCover && lineOfSight(sim, t.eye(), me.chest(), c.id, me.id);
+    if (exposed) {
+        if (b.exposedSince < 0.0) b.exposedSince = now;
+        b.maxExposed = std::max(b.maxExposed, float(now - b.exposedSince));
+    } else {
+        b.exposedSince = -1.0;
+    }
+    manageLight(b, sim, true, dist);
+
+    // Getting to cover (or out of sight): run there looking where you're going; only shoot on the
+    // move if they're close.
+    bool relocating = (b.hasCover && toCover > 2.5f) || (b.tactic != Tactic::Engage && b.tactic != Tactic::Push && b.tacticPoint.x < 1e8f) ||
+                      (!b.hasCover && b.tacticPoint.x < 1e8f);
+    if (relocating && dist > 15.0f && !(b.tactic == Tactic::Search && dist < 25.0f)) {
+        glm::vec2 dir = b.pathIndex < b.path.size() ? xz(b.path[b.pathIndex]) - xz(me.position) : glm::vec2(0.0f);
+        if (glm::length(dir) > 0.1f) {
+            float want = std::atan2(-dir.x, -dir.y);
+            lookToward(b, want, 6.0f);
+            b.wantPitch = 0.0f;
+            // move input is relative to the look: re-steer now that the look follows the path
+            steer(b, sim, dir, b.tactic != Tactic::Search && !crouch);
+            b.input.crouch = crouch && b.tactic == Tactic::Search;
+        }
+        b.input.weapon.adsHeld = false;
+        b.burst = 0;
+        b.reaction = std::max(b.reaction, 0.15f); // turning back takes a moment
+        return;
+    }
 
     // ----- aiming
     b.reaction -= dt;
@@ -672,32 +1125,27 @@ void BotManager::fight(Bot& b, float dt, Simulation& sim, Contact& c) {
         float v = wd.projectile.muzzleVelocity;
         float tof = dist / std::max(v * 0.85f, 100.0f);
         aimAt += t.velocity * tof * b.skill;
-        // Hold over for drop beyond the zero.
         float tz = me.weapon.zeroRange() / v;
         float drop = 0.5f * 9.81f * (tof * tof - tz * tz);
         aimAt.y += drop * b.skill;
     }
-    // Shaky, imperfect tracking: worse when hurried, hurt or shot at.
     float sigma = 0.004f + 0.02f * (1.0f - b.skill) + me.suppression * 0.02f + (me.horizontalSpeed() > 0.5f ? 0.01f : 0.0f) +
-                  (b.reaction > 0.0f ? 0.03f : 0.0f);
+                  (b.reaction > 0.0f ? 0.03f : 0.0f) + (now < b.dazzledUntil ? 0.03f : 0.0f);
+    if (me.weapon.laserOn() && !me.weapon.isAiming()) sigma *= 0.6f; // the dot shows where the gun points
     std::normal_distribution<float> n(0.0f, 1.0f);
     const float tau = 0.5f;
     b.aimError += -b.aimError * (dt / tau) + glm::vec2(n(b.rng), n(b.rng)) * sigma * std::sqrt(2.0f * dt / tau);
     glm::vec3 to = aimAt - eye;
     float flat = std::sqrt(to.x * to.x + to.z * to.z);
-    float wantYaw = yawOf(to) + b.aimError.x;
-    float wantPitch = std::atan2(to.y, std::max(flat, 0.01f)) + b.aimError.y;
-    // Tracking a target: a quicker, stiffer neck than when just looking around.
-    b.wantYaw = wantYaw;
-    b.wantPitch = wantPitch;
+    b.wantYaw = yawOf(to) + b.aimError.x;
+    b.wantPitch = std::atan2(to.y, std::max(flat, 0.01f)) + b.aimError.y;
     b.turnRate = 2.5f + 5.0f * b.skill;
     b.lookStiffness = 14.0f + 10.0f * b.skill;
 
     bool optic = me.weapon.optic().type != OpticType::Iron;
-    bool wantAds = (visible || b.peeking) && (dist > 12.0f || optic) && !me.weapon.isReloading();
+    bool wantAds = (visible || b.peeking) && (dist > 12.0f || optic) && !me.weapon.isReloading() && !b.input.sprint;
     if (wantAds) b.adsUntil = now + 0.8;
-    b.input.weapon.adsHeld = !me.weapon.isReloading() && (wantAds || now < b.adsUntil);
-    // Full auto up close, single shots further out.
+    b.input.weapon.adsHeld = !me.weapon.isReloading() && (wantAds || now < b.adsUntil) && !b.input.sprint;
     if (wd.canAuto && me.weapon.item()) {
         bool wantAuto = dist < 35.0f;
         if (wantAuto != me.weapon.isFullAuto()) b.input.weapon.toggleFireMode = true;
@@ -705,10 +1153,11 @@ void BotManager::fight(Bot& b, float dt, Simulation& sim, Contact& c) {
 
     // ----- trigger
     if (!visible || b.reaction > 0.0f || !me.weapon.hasWeapon()) {
-        // Suppressing fire at where they were last seen.
-        if (!visible && b.aggression > 0.75f && now - c.lastSeen < 2.5 && now >= b.nextShot && me.weapon.ammo() > 5) {
-            b.input.weapon.firePressed = true;
+        if (!visible && b.aggression > 0.75f && now - c.lastSeen < 2.5 && now >= b.nextShot && me.weapon.ammo() > 5 && inCover) {
+            b.input.weapon.firePressed = true; // suppressing where they were
             b.nextShot = now + 0.5 + u01(b.rng) * 0.5;
+            ++sim.stats.botShots;
+            ++sim.stats.botCoveredShots;
         }
         return;
     }
@@ -716,19 +1165,26 @@ void BotManager::fight(Bot& b, float dt, Simulation& sim, Contact& c) {
     glm::vec3 want = glm::normalize(aimAt - me.weapon.muzzle());
     float err = std::acos(std::clamp(glm::dot(bore, want), -1.0f, 1.0f));
     float tolerance = std::max(0.003f, 0.22f / std::max(dist, 1.0f)) * (1.6f - b.skill);
-    if (dist > range * 1.3f) return; // too far for this gun
+    if (dist > range * 1.3f) return;
     if (err < tolerance && now >= b.nextShot) {
+        bool fired = false;
         if (me.weapon.isFullAuto()) {
             b.input.weapon.fireHeld = true;
             b.input.weapon.firePressed = true;
+            fired = true;
             if (++b.burst > int(40 + 60 * u01(b.rng))) {
                 b.burst = 0;
                 b.nextShot = now + 0.25 + 0.3 * u01(b.rng);
             }
         } else {
             b.input.weapon.firePressed = true;
+            fired = true;
             float base = dist < 20.0f ? 0.18f : dist < 80.0f ? 0.32f : 0.7f;
             b.nextShot = now + base * (1.4f - 0.6f * b.skill) * (0.8f + 0.4f * u01(b.rng));
+        }
+        if (fired && b.burst <= 1) {
+            ++sim.stats.botShots;
+            if (inCover) ++sim.stats.botCoveredShots;
         }
     } else {
         b.burst = 0;
@@ -737,9 +1193,32 @@ void BotManager::fight(Bot& b, float dt, Simulation& sim, Contact& c) {
 
 void BotManager::heal(Bot& b, Simulation& sim) {
     Character& me = *sim.chars[b.id];
+    const double now = sim.time;
     b.input.crouch = true;
     b.input.move = glm::vec2(0.0f);
     if (me.action() == Character::Action::Med) return;
+    // With enemies about, get somewhere none of them can see before stopping to treat wounds.
+    std::vector<glm::vec3> threats = knownThreats(b, sim, 60.0f, 20.0);
+    bool hidden = true;
+    for (const glm::vec3& t : threats)
+        if (lineOfSight(sim, me.position + glm::vec3(0, 1.15f, 0), t, me.id, -2)) hidden = false;
+    if (!hidden && !(me.health.heavyBleeding() && me.health.totalHp() < me.health.totalMax() * 0.3f)) {
+        if (!b.healSpotSet && findHiddenSpot(b, sim, threats, 4.0f, 30.0f, b.healSpot)) {
+            b.healSpotSet = true;
+            b.healSince = now;
+            b.hiddenRoute = true;
+            b.wantPath = true;
+        }
+        if (b.healSpotSet && now - b.healSince < 15.0 &&
+            glm::length(xz(b.healSpot - me.position)) + (std::abs(b.healSpot.y - me.position.y) > 1.6f ? 6.0f : 0.0f) > 1.0f) {
+            b.input.crouch = false;
+            moveTo3(b, b.healSpot, sim, true, 0.8f);
+            glm::vec2 dir = b.pathIndex < b.path.size() ? xz(b.path[b.pathIndex]) - xz(me.position) : xz(b.healSpot - me.position);
+            if (glm::length(dir) > 0.1f) lookToward(b, std::atan2(-dir.x, -dir.y), 5.0f);
+            return;
+        }
+    }
+    bool counted = hidden && !threats.empty();
     // Worst problem first.
     MedKind order[] = {MedKind::Tourniquet, MedKind::Hemostatic, MedKind::Bandage, MedKind::Splint, MedKind::FieldKit,
                        MedKind::Painkillers, MedKind::Surgical};
@@ -752,6 +1231,7 @@ void BotManager::heal(Bot& b, Simulation& sim) {
                 if (e.item->d().cat == ItemCat::Med && e.item->d().med == k) {
                     b.input.useMed = e.item->uid;
                     b.input.useMedZone = zone;
+                    if (counted) ++sim.stats.botHealsHidden;
                     return;
                 }
     }
@@ -798,6 +1278,14 @@ void BotManager::takeLoot(Bot& b, Simulation& sim) {
         if (body && body->stow(it)) return;
         sim.dropFromCharacter(me, std::move(it));
     };
+    auto peekItem = [&](uint32_t uid) -> const Item* {
+        if (grid) {
+            for (const Grid::Entry& e : grid->items)
+                if (e.item->uid == uid) return e.item.get();
+            return nullptr;
+        }
+        return body->find(uid);
+    };
     auto usable = [&](const ItemDef& d) {
         for (int s : {ES_Hand0, ES_Hand1}) {
             const Item* w = me.equip.slots[s].get();
@@ -837,9 +1325,81 @@ void BotManager::takeLoot(Bot& b, Simulation& sim) {
         case ItemCat::Rig:
         case ItemCat::Backpack: {
             int slot = o.cat == ItemCat::Rig ? ES_Rig : ES_Backpack;
-            if (me.equip.slots[slot]) break;
+            const Item* offer = peekItem(o.uid);
+            if (!offer) break;
+            if (me.equip.slots[slot]) {
+                // Bigger: swap, moving everything across.
+                const ItemDef& cur = me.equip.slots[slot]->d();
+                if (offer->d().gridW * offer->d().gridH <= cur.gridW * cur.gridH) break;
+                ItemPtr it = take(o.uid);
+                if (!it || !it->grid) break;
+                ItemPtr old = std::move(me.equip.slots[slot]);
+                for (Grid::Entry& e : it->grid->items) giveBack(std::move(e.item)); // whatever was in the new one stays here
+                it->grid->items.clear();
+                for (Grid::Entry& e : old->grid->items)
+                    if (!it->grid->autoPlace(e.item)) giveBack(std::move(e.item));
+                old->grid->items.clear();
+                me.equip.slots[slot] = std::move(it);
+                giveBack(std::move(old));
+                ++sim.stats.botGearSwaps;
+                break;
+            }
             ItemPtr it = take(o.uid);
             if (it) me.equip.slots[slot] = std::move(it);
+            break;
+        }
+        case ItemCat::Armor:
+        case ItemCat::Helmet: {
+            int slot = o.cat == ItemCat::Armor ? ES_Armor : ES_Helmet;
+            const Item* offer = peekItem(o.uid);
+            if (!offer) break;
+            auto rating = [](const Item& a) { return a.d().armorClass * std::clamp(a.condition / std::max(1.0f, a.d().durability), 0.0f, 1.0f); };
+            float cur = me.equip.slots[slot] ? rating(*me.equip.slots[slot]) : 0.0f;
+            if (rating(*offer) <= cur + 0.3f) break;
+            ItemPtr it = take(o.uid);
+            if (!it) break;
+            ItemPtr old = std::move(me.equip.slots[slot]);
+            me.equip.slots[slot] = std::move(it);
+            giveBack(std::move(old));
+            ++sim.stats.botGearSwaps;
+            break;
+        }
+        case ItemCat::Attachment: {
+            const Item* offer = peekItem(o.uid);
+            if (!offer) break;
+            int a = offer->d().attach;
+            const AttachmentDef& ad = attachmentDefs()[a];
+            for (int s : {ES_Hand0, ES_Hand1}) {
+                Item* gun = me.equip.slots[s].get();
+                if (!gun || gun->d().cat != ItemCat::Weapon || !attachmentFits(weaponDefs()[gun->d().weapon], a, gun)) continue;
+                int cur = gun->att[ad.slot];
+                if (cur >= 0 && attachmentDefs()[cur].value * 1.2f >= ad.value) continue;
+                ItemPtr it = take(o.uid);
+                if (!it) break;
+                gun->att[ad.slot] = a;
+                gun->attachmentsChanged();
+                if (cur >= 0) giveBack(makeItem(attachmentItemDef(cur)));
+                ++sim.stats.botAttachmentsFitted;
+                break;
+            }
+            break;
+        }
+        case ItemCat::Optic: {
+            const Item* offer = peekItem(o.uid);
+            Item* gun = me.equip.slots[ES_Hand0].get();
+            if (!offer || !gun || gun->d().cat != ItemCat::Weapon) break;
+            int op = offer->d().optic;
+            if (!opticFits(weaponDefs()[gun->d().weapon], op)) break;
+            int curItem = gun->optic > 0 ? opticItemDef(gun->optic) : -1;
+            if (curItem >= 0 && itemDefs()[curItem].value * 1.2f >= offer->d().value) break;
+            ItemPtr it = take(o.uid);
+            if (!it) break;
+            int old = gun->optic;
+            gun->optic = op;
+            gun->magnification = opticDefs()[op].minMag;
+            gun->altSight = false;
+            if (old > 0) giveBack(makeItem(opticItemDef(old)));
+            ++sim.stats.botAttachmentsFitted;
             break;
         }
         case ItemCat::Med:
@@ -894,7 +1454,7 @@ void BotManager::loot(Bot& b, float dt, Simulation& sim) {
         target = sim.loot.items[b.lootIndex].position;
         it = {Interaction::Item, b.lootIndex};
     }
-    float d = glm::length(xz(target - me.position));
+    float d = glm::length(xz(target - me.position)) + (std::abs(target.y - me.position.y) > 1.6f ? 6.0f : 0.0f);
     if (sim.time - b.goalSince > 90.0) {
         // Taking too long: forget it.
         if (b.lootType == 1) b.doneContainers.push_back(b.lootIndex);
@@ -903,11 +1463,50 @@ void BotManager::loot(Bot& b, float dt, Simulation& sim) {
         b.goalSince = sim.time;
         return;
     }
+    if (b.lootType == 2 && b.watchedBody != b.lootIndex) {
+        bool mine = std::find(b.myKills.begin(), b.myKills.end(), b.lootIndex) != b.myKills.end();
+        if (b.watchingBody != b.lootIndex && d < 30.0f) {
+            b.watchingBody = b.lootIndex;
+            b.watchStart = sim.time;
+            b.watchUntil = sim.time + (mine ? 1.5 : 4.0 + 6.0 * b.caution);
+            ++sim.stats.botBodyWatches;
+        }
+        if (b.watchingBody == b.lootIndex) {
+            // Hold back, low, gun up, and watch the body and what's round it.
+            b.input.crouch = true;
+            b.input.move = glm::vec2(0.0f);
+            b.input.weapon.adsHeld = true;
+            glm::vec3 to = target - me.eye();
+            if (sim.time > b.scanTime) {
+                b.scanYaw = u11(b.rng) * 0.6f;
+                b.scanTime = sim.time + 1.0 + u01(b.rng);
+            }
+            lookToward(b, yawOf(to) + b.scanYaw, 2.0f);
+            b.wantPitch = std::atan2(to.y, std::max(0.1f, glm::length(xz(to))));
+            for (const Noise& n : b.noises)
+                if (n.time > b.watchStart && n.importance >= 0.3f && n.owner != b.id && glm::length(n.position - target) < 35.0f) {
+                    b.deferredBodies.push_back({b.lootIndex, sim.time}); // someone's there: not now
+                    b.watchingBody = -1;
+                    b.lootType = 0;
+                    return;
+                }
+            if (sim.time >= b.watchUntil) {
+                b.watchedBody = b.lootIndex;
+                b.watchingBody = -1;
+            }
+            return;
+        }
+    }
     if (d > 1.9f) {
         b.allowFinal = true;
-        moveTo(b, xz(target), sim, d > 25.0f, 1.2f);
+        bool careful = b.lootType == 2 && d < 14.0f;
+        moveTo3(b, target, sim, d > 25.0f && !careful, 1.2f);
+        if (careful) {
+            b.input.crouch = true;
+            b.input.weapon.adsHeld = true;
+        }
         b.allowFinal = false;
-        glm::vec2 dir = b.pathIndex < b.path.size() ? b.path[b.pathIndex] - xz(me.position) : xz(target - me.position);
+        glm::vec2 dir = b.pathIndex < b.path.size() ? xz(b.path[b.pathIndex]) - xz(me.position) : xz(target - me.position);
         if (glm::length(dir) > 0.1f) {
             float want = std::atan2(-dir.x, -dir.y);
             lookToward(b, want, 4.0f);
@@ -927,6 +1526,7 @@ void BotManager::loot(Bot& b, float dt, Simulation& sim) {
         return;
     }
     if (sim.interact(me, it, true, dt)) {
+        if (b.lootType == 1 && sim.loot.containers[b.lootIndex].lootZone) ++b.zoneLoots;
         takeLoot(b, sim);
         b.pauseUntil = sim.time + 0.8 + u01(b.rng);
         if (b.lootType == 1) b.doneContainers.push_back(b.lootIndex);
@@ -962,7 +1562,7 @@ void BotManager::extractGoal(Bot& b, float dt, Simulation& sim) {
     float reach = sendBack ? 1.6f : e.radius - 2.0f;
     if (d > reach) {
         moveTo(b, xz(target), sim, d > 20.0f, reach * 0.6f);
-        glm::vec2 dir = b.pathIndex < b.path.size() ? b.path[b.pathIndex] - xz(me.position) : xz(target - me.position);
+        glm::vec2 dir = b.pathIndex < b.path.size() ? xz(b.path[b.pathIndex]) - xz(me.position) : xz(target - me.position);
         if (glm::length(dir) > 0.1f) lookToward(b, std::atan2(-dir.x, -dir.y), 4.0f);
         b.wantPitch = 0.0f;
         return;
@@ -1019,7 +1619,7 @@ void BotManager::act(Bot& b, float dt, Simulation& sim) {
             b.phaseUntil = now + 6.0;
         }
         moveTo(b, b.fleeTo, sim, true, 3.0f);
-        glm::vec2 dir = b.pathIndex < b.path.size() ? b.path[b.pathIndex] - xz(me.position) : away;
+        glm::vec2 dir = b.pathIndex < b.path.size() ? xz(b.path[b.pathIndex]) - xz(me.position) : away;
         lookToward(b, std::atan2(-dir.x, -dir.y), 5.0f);
         if (me.health.bleeding() && hasMeds(me) && (!c || !c->visible)) heal(b, sim);
         break;
@@ -1044,8 +1644,22 @@ void BotManager::act(Bot& b, float dt, Simulation& sim) {
                 if (n.importance >= 0.8f && now - n.time < 40.0) lure = &n;
             dest = xz(lure->position);
             float d = glm::length(dest - xz(me.position));
+            // Into someone else's fight: fast until near, then quiet, then wait for an opening.
             sprint = d > 90.0f;
-            b.input.weapon.adsHeld = d < 45.0f && u01(b.rng) < 0.02f ? !prev.weapon.adsHeld : prev.weapon.adsHeld && d < 45.0f;
+            bool quiet = d < 70.0f;
+            if (lure->time != b.huntNoise) {
+                b.huntNoise = lure->time;
+                if (d < 45.0f && b.huntHoldUntil < now - 20.0) b.huntHoldUntil = now + 4.0 + 6.0 * b.caution;
+            }
+            b.input.weapon.adsHeld = d < 45.0f;
+            if (quiet) b.input.crouch = d < 35.0f;
+            if (now < b.huntHoldUntil) {
+                b.input.move = glm::vec2(0.0f);
+                b.input.crouch = true;
+                lookToward(b, std::atan2(-(dest.x - me.position.x), -(dest.y - me.position.z)), 2.0f);
+                b.wantPitch = 0.0f;
+                break;
+            }
             if (d < 6.0f) {
                 b.noises.clear();
                 b.goal = Goal::Roam;
@@ -1057,14 +1671,48 @@ void BotManager::act(Bot& b, float dt, Simulation& sim) {
                     for (int i = 0; i < int(sim.map.hotspots.size()); ++i)
                         if (glm::length(xz(sim.map.hotspots[i].position) - b.roamTarget) < 10.0f) b.doneHotspots.push_back(i);
                 }
-                std::vector<int> options;
-                for (int i = 0; i < int(sim.map.hotspots.size()); ++i)
-                    if (std::find(b.doneHotspots.begin(), b.doneHotspots.end(), i) == b.doneHotspots.end()) options.push_back(i);
-                if (!options.empty() && u01(b.rng) < 0.7f) b.roamTarget = xz(sim.map.hotspots[options[size_t(u01(b.rng) * options.size()) % options.size()]].position);
-                else b.roamTarget = glm::vec2(u11(b.rng), u11(b.rng)) * (sim.map.halfSize > 0.0f ? sim.map.halfSize * 0.8f : 30.0f);
+                // Where next: hotspots, weighted by kit (the loot zone draws the well armed; the poorly
+                // armed either slip in and out, or wait by the way out for people leaving it).
+                const LootZone& zone = sim.map.lootZone;
+                if (b.ambusher && b.ambushUntil < -1e8 && zone.radius > 0.0f && !sim.map.extracts.empty()) {
+                    const ExtractPoint* ex = &sim.map.extracts[0];
+                    for (const ExtractPoint& e : sim.map.extracts)
+                        if (glm::length(xz(e.position) - zone.center) < glm::length(xz(ex->position) - zone.center)) ex = &e;
+                    glm::vec2 dir = glm::normalize(xz(ex->position) - zone.center + glm::vec2(1e-3f));
+                    b.roamTarget = zone.center + dir * (zone.radius + 25.0f);
+                    b.ambushUntil = -1.0; // armed: set on arrival
+                } else {
+                    if (b.ambushUntil == -1.0 && b.roamTarget.x < 1e8f) {
+                        b.ambushUntil = now + 60.0 + 60.0 * u01(b.rng);
+                        b.pauseUntil = b.ambushUntil;
+                    }
+                    std::vector<int> options;
+                    std::vector<float> weights;
+                    float total = 0.0f;
+                    for (int i = 0; i < int(sim.map.hotspots.size()); ++i) {
+                        if (std::find(b.doneHotspots.begin(), b.doneHotspots.end(), i) != b.doneHotspots.end()) continue;
+                        float w = 1.0f;
+                        if (sim.map.hotspots[i].lootZone) w = b.power > 0.55f ? 3.5f : b.power < 0.35f ? 0.6f : 1.5f;
+                        options.push_back(i);
+                        weights.push_back(w);
+                        total += w;
+                    }
+                    if (!options.empty() && u01(b.rng) < 0.7f) {
+                        float r = u01(b.rng) * total;
+                        size_t k = 0;
+                        while (k + 1 < options.size() && (r -= weights[k]) > 0.0f) ++k;
+                        b.roamTarget = xz(sim.map.hotspots[options[k]].position);
+                    } else {
+                        b.roamTarget = glm::vec2(u11(b.rng), u11(b.rng)) * (sim.map.halfSize > 0.0f ? sim.map.halfSize * 0.8f : 30.0f);
+                    }
+                }
                 b.lootType = 0;
             }
             dest = b.roamTarget;
+            // Poorly armed: no running about near the places people gather.
+            if (b.power < 0.35f)
+                for (const Hotspot& h : sim.map.hotspots)
+                    if (glm::length(xz(h.position - me.position)) < 50.0f) sprint = false;
             // While roaming, opportunistically loot.
             if (sim.time > b.nextThink - 0.01 && chooseLootTarget(b, sim)) {
                 b.goal = Goal::Loot;
@@ -1073,7 +1721,7 @@ void BotManager::act(Bot& b, float dt, Simulation& sim) {
         }
         moveTo(b, dest, sim, sprint, 2.0f);
         // Look where we're going, glancing around now and then.
-        glm::vec2 dir = b.pathIndex < b.path.size() ? b.path[b.pathIndex] - xz(me.position) : dest - xz(me.position);
+        glm::vec2 dir = b.pathIndex < b.path.size() ? xz(b.path[b.pathIndex]) - xz(me.position) : dest - xz(me.position);
         float want = glm::length(dir) > 0.1f ? std::atan2(-dir.x, -dir.y) : b.yaw;
         if (now > b.scanTime) {
             b.scanYaw = u11(b.rng) * (b.input.sprint ? 0.2f : 0.9f);
@@ -1099,16 +1747,21 @@ void BotManager::act(Bot& b, float dt, Simulation& sim) {
         if (me.equip.slots[other]) b.input.weapon.selectWeapon = other;
     }
     if (sim.time < b.pauseUntil && b.goal != Goal::Fight && b.goal != Goal::Flee) {
-        // A pause to look and listen.
+        // A pause to look and listen (an ambusher waits low, watching the way from the loot zone).
         b.input.move = glm::vec2(0.0f);
         b.input.sprint = false;
+        bool ambush = now < b.ambushUntil && sim.map.lootZone.radius > 0.0f;
+        if (ambush) b.input.crouch = true;
         if (sim.time > b.scanTime) {
-            b.scanYaw = b.yaw + u11(b.rng) * 1.6f;
+            float toward = ambush ? std::atan2(-(sim.map.lootZone.center.x - me.position.x), -(sim.map.lootZone.center.y - me.position.z)) : b.yaw;
+            b.scanYaw = toward + u11(b.rng) * (ambush ? 0.6f : 1.6f);
             b.scanTime = sim.time + 0.8 + 1.2 * u01(b.rng);
         }
         lookToward(b, b.scanYaw, 1.6f);
         b.wantPitch = u11(b.rng) * 0.02f;
     }
+    if (b.ambusher && b.ambushUntil > 0.0 && now > b.ambushUntil) b.ambusher = false; // done waiting: go have a look
+    if (b.goal != Goal::Fight) manageLight(b, sim, false, 1e9f);
     applyLook(b, dt);
     // Feet don't change direction instantly either.
     float k = std::min(1.0f, dt * (b.goal == Goal::Fight ? 10.0f : 6.0f));

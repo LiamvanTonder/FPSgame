@@ -7,7 +7,13 @@
 #include <string>
 #include <vector>
 
-enum class ItemCat { Weapon, Magazine, Ammo, Med, Optic, Rig, Backpack };
+enum class ItemCat { Weapon, Magazine, Ammo, Med, Optic, Rig, Backpack, Attachment, Armor, Helmet };
+
+// Where an attachment goes on a gun (the optic keeps its own field on the item).
+enum AttachSlot { AS_Muzzle, AS_Under, AS_Side, AS_Stock, AS_Grip, AS_Offset, AS_Magnifier, kAttachSlots };
+
+// Body zones armour can cover (bit mask; matches the Health zone order).
+enum ArmorCover : uint8_t { AC_Head = 1, AC_Thorax = 2, AC_Stomach = 4 };
 enum class MedKind { Bandage, Tourniquet, Hemostatic, Splint, Painkillers, FieldKit, Surgical };
 
 // One kind of cartridge. Physical properties replace the weapon's standard load; the
@@ -55,6 +61,11 @@ struct ItemDef {
     float useTime = 3.0f;
     float hpPool = 0.0f;
     int gridW = 0, gridH = 0; // Rig / Backpack
+    int attach = -1;          // Attachment: index into attachmentDefs()
+    int armorClass = 0;       // Armor / Helmet: 1..4
+    float durability = 0.0f;  // Armor / Helmet: condition points when new
+    uint8_t coverage = 0;     // ArmorCover bits
+    float mass = 0.0f;        // kg (armour, attachments)
 };
 
 const std::vector<AmmoDef>& ammoDefs();
@@ -63,6 +74,7 @@ int findItemDef(const std::string& id);
 int findAmmo(const std::string& id);
 int weaponItemDef(int weapon);        // item def of a weapon
 int opticItemDef(int optic);          // item def of an optic (-1 for iron sights)
+int attachmentItemDef(int attachment); // item def of an attachment
 int defaultAmmo(int caliber);         // the common load of a calibre
 int magazineItemFor(int weapon);      // the standard magazine item for a gun (-1 if none)
 const char* categoryName(ItemCat c);

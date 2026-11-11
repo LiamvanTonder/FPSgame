@@ -7,7 +7,7 @@
 
 struct Profile;
 
-enum class StoreTab { Weapons, Ammo, Magazines, Medical, Optics, Gear, kCount };
+enum class StoreTab { Weapons, Ammo, Magazines, Medical, Optics, Attachments, Armor, Gear, kCount };
 const char* storeTabName(StoreTab t);
 
 struct StoreOffer {

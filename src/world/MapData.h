@@ -25,12 +25,35 @@ struct ContainerSpawn {
     float yaw = 0.0f;
     int tier = 0;     // loot quality bias
     int hotspot = -1; // index into hotspots, -1 if none
+    bool lootZone = false;
 };
 
 struct Hotspot {
     std::string name;
     glm::vec3 position{0.0f};
     float radius = 30.0f;
+    bool lootZone = false;
+};
+
+// Walkable upper levels (floors, mezzanines, roofs) and the stairs between levels.
+struct NavFloor {
+    glm::vec2 min{0.0f}, max{0.0f};
+    float y = 0.0f; // walking surface
+};
+struct NavLink {
+    glm::vec3 a{0.0f}, b{0.0f}; // foot and head of a straight flight of stairs
+};
+// A spot just inside a window or on a balcony to shoot from (facing = outward, xz).
+struct FiringSpot {
+    glm::vec3 position{0.0f};
+    glm::vec2 facing{0.0f};
+};
+// This raid's loot zone: one of the map's areas, with better gear.
+struct LootZone {
+    std::string name;
+    glm::vec2 center{0.0f};
+    float radius = 0.0f;
+    int area = -1;
 };
 
 struct ExtractPoint {
@@ -73,6 +96,13 @@ struct MapData {
     std::vector<MapRect> mapRects; // buildings, roads, woods for the map screen
     std::vector<glm::vec4> roads;  // segment a.xy -> b.zw (8 m wide incl. verges)
     std::vector<glm::vec3> woods;  // centre xz + radius
+    std::vector<NavFloor> floors;
+    std::vector<NavLink> links;
+    std::vector<FiringSpot> firingSpots;
+    LootZone lootZone;
+    bool inLootZone(const glm::vec3& p) const {
+        return lootZone.radius > 0.0f && glm::length(glm::vec2(p.x, p.z) - lootZone.center) < lootZone.radius;
+    }
     float halfSize = 0.0f;         // playable area is [-halfSize, halfSize]^2 (0: no map)
     bool hasTerrain = false;
     unsigned seed = 0;

@@ -1,5 +1,6 @@
 #include "items/ItemDefs.h"
 
+#include "game/Attachments.h"
 #include "game/WeaponDefs.h"
 
 #include <algorithm>
@@ -112,7 +113,7 @@ std::vector<ItemDef> buildItems() {
     struct Mag { const char* id; const char* name; int family, cal, cap, h, value, tier; };
     auto magShort = [](int family) -> const char* {
         const char* n[kMagFamilyCount] = {"9mm", ".45", "10mm", "9mm", ".45", "4.6", "STANAG", "5.45", "7.62", ".308", "54R", ".308", "Box",
-                                          "5.7", "5.7", "12ga", "6.5", "Belt"};
+                                          "5.7", "5.7", "12ga", "6.5", "Belt", ".338"};
         return family >= 0 && family < kMagFamilyCount ? n[family] : "Mag";
     };
     const Mag mags[] = {
@@ -142,6 +143,11 @@ std::vector<ItemDef> buildItems() {
         {"65_10", "6.5mm mag 10", Mag_65, Cal_65, 10, 1, 160, 2},
         {"65_20", "6.5mm mag 20", Mag_65, Cal_65, 20, 2, 280, 2},
         {"box308_100", "7.62x51 belt box 100", Mag_Box308, Cal_762x51, 100, 2, 1100, 3},
+        {"pistol9_33", "9mm stick mag 33", Mag_Pistol9, Cal_9x19, 33, 2, 220, 2},
+        {"545_60", "5.45 quad mag 60", Mag_545, Cal_545, 60, 3, 520, 3},
+        {"762x39_75", "7.62x39 drum 75", Mag_762x39, Cal_762x39, 75, 2, 780, 3},
+        {"smg45_40", ".45 SMG stick 40", Mag_Smg45, Cal_45ACP, 40, 2, 260, 2},
+        {"338_10", ".338 magnum mag 10", Mag_338, Cal_338, 10, 2, 420, 3},
     };
     for (const Mag& m : mags) {
         ItemDef d = item(std::string("m_") + m.id, m.name, magShort(m.family), ItemCat::Magazine, (m.family == Mag_Box556 || m.family == Mag_Box308) ? 2 : 1, m.h,
@@ -197,10 +203,46 @@ std::vector<ItemDef> buildItems() {
     const int opticTier[] = {0, 0, 1, 1, 2, 3};
     const auto& optics = opticDefs();
     for (int i = 1; i < int(optics.size()); ++i) {
-        const char* opticShort[] = {"", "Dot", "2x", "4x", "8x", "3-12x"};
-        ItemDef d = item("o_" + std::to_string(i), optics[i].name, opticShort[std::min(i, 5)], ItemCat::Optic, opticSize[i], 1,
-                         opticValue[i], opticTier[i], glm::vec3(0.12f, 0.12f, 0.14f));
+        if (!optics[i].item) continue;
+        const char* opticShort[] = {"", "Dot", "2x", "4x", "8x", "3-12x", "Holo", "3x", "1-6x", "4x C"};
+        const int extraSize[] = {2, 2, 3, 2}, extraValue[] = {1300, 1900, 3900, 2400}, extraTier[] = {1, 1, 2, 2};
+        bool extra = i > 5;
+        int k = std::min(i - 6, 3);
+        ItemDef d = item("o_" + std::to_string(i), optics[i].name, opticShort[std::min(i, 9)], ItemCat::Optic,
+                         extra ? extraSize[k] : opticSize[i], 1, extra ? extraValue[k] : opticValue[i], extra ? extraTier[k] : opticTier[i],
+                         glm::vec3(0.12f, 0.12f, 0.14f));
         d.optic = i;
+        v.push_back(d);
+    }
+
+    // Weapon attachments
+    const auto& atts = attachmentDefs();
+    for (int i = 0; i < int(atts.size()); ++i) {
+        const AttachmentDef& a = atts[i];
+        ItemDef d = item("x_" + a.id, a.name, a.shortName, ItemCat::Attachment, a.w, a.h, a.value, a.tier, a.color);
+        d.attach = i;
+        d.mass = a.mass;
+        d.caliber = -1;
+        v.push_back(d);
+    }
+
+    // Body armour and helmets: class, condition points, coverage, mass
+    struct Armor { const char* id; const char* name; const char* shortName; ItemCat cat; int w, h, cls; float dur; uint8_t cover; float mass; int value, tier; glm::vec3 col; };
+    const Armor armors[] = {
+        {"arm_soft", "Soft armour vest (class 1)", "Vest I", ItemCat::Armor, 3, 3, 1, 50.0f, AC_Thorax | AC_Stomach, 2.6f, 800, 0, {0.28f, 0.30f, 0.26f}},
+        {"arm_patrol", "Patrol plate carrier (class 2)", "Plates II", ItemCat::Armor, 3, 3, 2, 60.0f, AC_Thorax, 4.8f, 2200, 1, {0.36f, 0.34f, 0.26f}},
+        {"arm_assault", "Assault plates (class 3)", "Plates III", ItemCat::Armor, 3, 3, 3, 75.0f, AC_Thorax | AC_Stomach, 8.0f, 5500, 2, {0.22f, 0.26f, 0.22f}},
+        {"arm_heavy", "Heavy plate armour (class 4)", "Plates IV", ItemCat::Armor, 3, 4, 4, 90.0f, AC_Thorax | AC_Stomach, 11.5f, 12000, 3, {0.16f, 0.17f, 0.18f}},
+        {"helm_bump", "Bump helmet (class 1)", "Helm I", ItemCat::Helmet, 2, 2, 1, 30.0f, AC_Head, 0.8f, 500, 0, {0.30f, 0.30f, 0.28f}},
+        {"helm_ballistic", "Ballistic helmet (class 2)", "Helm II", ItemCat::Helmet, 2, 2, 2, 40.0f, AC_Head, 1.4f, 1800, 1, {0.32f, 0.35f, 0.26f}},
+        {"helm_heavy", "Heavy helmet (class 3)", "Helm III", ItemCat::Helmet, 2, 2, 3, 50.0f, AC_Head, 2.3f, 4800, 2, {0.20f, 0.22f, 0.20f}},
+    };
+    for (const Armor& a : armors) {
+        ItemDef d = item(a.id, a.name, a.shortName, a.cat, a.w, a.h, a.value, a.tier, a.col);
+        d.armorClass = a.cls;
+        d.durability = a.dur;
+        d.coverage = a.cover;
+        d.mass = a.mass;
         v.push_back(d);
     }
 
@@ -261,6 +303,17 @@ int opticItemDef(int optic) {
     return -1;
 }
 
+int attachmentItemDef(int attachment) {
+    static std::vector<int> map;
+    if (map.empty()) {
+        map.assign(attachmentDefs().size(), -1);
+        const auto& d = itemDefs();
+        for (int i = 0; i < int(d.size()); ++i)
+            if (d[i].cat == ItemCat::Attachment && d[i].attach >= 0 && d[i].attach < int(map.size())) map[d[i].attach] = i;
+    }
+    return attachment >= 0 && attachment < int(map.size()) ? map[attachment] : -1;
+}
+
 int defaultAmmo(int caliber) {
     const auto& a = ammoDefs();
     for (int i = 0; i < int(a.size()); ++i)
@@ -291,6 +344,9 @@ const char* categoryName(ItemCat c) {
     case ItemCat::Optic: return "Optic";
     case ItemCat::Rig: return "Rig";
     case ItemCat::Backpack: return "Backpack";
+    case ItemCat::Attachment: return "Attachment";
+    case ItemCat::Armor: return "Body armour";
+    case ItemCat::Helmet: return "Helmet";
     }
     return "?";
 }

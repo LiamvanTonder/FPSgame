@@ -22,6 +22,9 @@ enum BodyPart {
     kBodyPartCount
 };
 const char* bodyPartName(int part);
+// Does this armour (at this condition) stop the bullet? Penetration comes from the load and
+// the energy it still carries; worn armour stops less.
+bool armorStopsBullet(const ItemDef& armor, float condition, const AmmoDef& ammo, float energyJ, float jitter = 0.0f);
 
 struct BodyParams {
     float walkSpeed = 2.4f;    // brisk walk with a rifle up
@@ -92,6 +95,10 @@ public:
 
     // Called for a bullet that hit one of this body's parts. Returns a short description.
     std::string onHit(int part, const Impact& imp, SimContext& sc);
+    // Armour between the bullet and this hit point, -1 if none (equipment slot).
+    int armorSlotFor(int part, const glm::vec3& point) const;
+    float carriedArmorMass() const;
+    int armorStops = 0, armorPenetrations = 0;
     void kill(const std::string& cause, int killer, const glm::vec3& point, const glm::vec3& impulse, SimContext& sc);
 
     // Starts a timed action (meds, loading a magazine); cancelled by firing, sprinting or another action.

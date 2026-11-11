@@ -3,6 +3,7 @@
 #include "game/Character.h"
 #include "game/Simulation.h"
 #include "game/WeaponDefs.h"
+#include "game/Attachments.h"
 #include "items/Profile.h"
 #include "render/Hud.h"
 
@@ -26,6 +27,8 @@ glm::vec4 catColor(ItemCat c) {
     case ItemCat::Optic: return {0.15f, 0.17f, 0.24f, 0.95f};
     case ItemCat::Rig: return {0.25f, 0.29f, 0.19f, 0.95f};
     case ItemCat::Backpack: return {0.30f, 0.24f, 0.17f, 0.95f};
+    case ItemCat::Attachment: return {0.17f, 0.20f, 0.26f, 0.95f};
+    case ItemCat::Armor: case ItemCat::Helmet: return {0.24f, 0.27f, 0.25f, 0.95f};
     }
     return {0.3f, 0.3f, 0.3f, 0.95f};
 }
@@ -79,7 +82,7 @@ void InventoryUi::drawItem(Hud& hud, const Item& it, Rect r, float alpha) {
     frame(hud, r.x + 1, r.y + 1, r.w - 2, r.h - 2, glm::vec4(0.0f, 0.0f, 0.0f, 0.6f * alpha));
     if (d.cat == ItemCat::Weapon) {
         // Side-view silhouette from the weapon's parts.
-        const WeaponDef& w = weaponDefs()[d.weapon];
+        const WeaponDef& w = it.weaponDef();
         float L = w.length + (w.wallBack > 0.0f ? 0.0f : 0.02f);
         float sx = (r.w - 10) / std::max(L, 0.2f);
         float sc = std::min(sx, (r.h - 16) / 0.25f);
@@ -100,6 +103,10 @@ void InventoryUi::drawItem(Hud& hud, const Item& it, Rect r, float alpha) {
     if (d.cat == ItemCat::Med && d.hpPool > 0.0f) {
         float f = it.pool / d.hpPool;
         hud.rect(r.x + 3, r.y + r.h - 6, (r.w - 6) * f, 3, glm::vec4(0.4f, 0.9f, 0.4f, alpha));
+    }
+    if ((d.cat == ItemCat::Armor || d.cat == ItemCat::Helmet) && d.durability > 0.0f) {
+        float f = std::clamp(it.condition / d.durability, 0.0f, 1.0f);
+        hud.rect(r.x + 3, r.y + r.h - 6, (r.w - 6) * f, 3, glm::vec4(glm::mix(glm::vec3(0.9f, 0.3f, 0.2f), glm::vec3(0.4f, 0.8f, 0.9f), f), alpha));
     }
 }
 
@@ -171,9 +178,12 @@ void InventoryUi::drawEquipment(Hud& hud, Equipment& eq, float x, float y, bool 
     float gy = compact ? y + 2 * (2 * c + gap) : y + 4 * (2 * c + gap);
     drawSlot(hud, eq, ES_Rig, {x, gy, 2.5f * c, 2 * c}, mine);
     drawSlot(hud, eq, ES_Backpack, {x + 2.5f * c + 10 * m_s, gy, 2.5f * c, 2 * c}, mine);
+    float ay = gy + 2 * c + gap;
+    drawSlot(hud, eq, ES_Armor, {x, ay, 2.5f * c, 2 * c}, mine);
+    drawSlot(hud, eq, ES_Helmet, {x + 2.5f * c + 10 * m_s, ay, 2.5f * c, 2 * c}, mine);
     // Grids
     float gx = compact ? x : x + 5 * c + 30 * m_s;
-    float yy = compact ? gy + 2 * c + gap + 4 : y;
+    float yy = compact ? ay + 2 * c + gap + 4 : y;
     if (eq.slots[ES_Rig] && eq.slots[ES_Rig]->grid) {
         drawGrid(hud, *eq.slots[ES_Rig]->grid, gx, yy, "Rig", mine);
         yy += eq.slots[ES_Rig]->grid->h * c + gap + 4;
@@ -234,7 +244,7 @@ void InventoryUi::drawTooltip(Hud& hud, const Item& it, glm::vec2 at, float W, f
     lines.push_back(std::string(categoryName(d.cat)) + fmt("   value %d", it.totalValue()));
     switch (d.cat) {
     case ItemCat::Weapon: {
-        const WeaponDef& w = weaponDefs()[d.weapon];
+        const WeaponDef& w = it.weaponDef();
         lines.push_back(fmt("%s   %.0f m/s   %s", caliberName(w.caliber), w.projectile.muzzleVelocity,
                             w.canAuto ? "semi / auto" : w.action == ActionType::Bolt ? "bolt action" : w.action == ActionType::Pump ? "pump action" : "semi-auto"));
         lines.push_back(fmt("Loaded %d / %d   optic: %s", loadedRounds(it), loadedCapacity(it), opticDefs()[it.optic].name.c_str()));
@@ -249,8 +259,39 @@ void InventoryUi::drawTooltip(Hud& hud, const Item& it, glm::vec2 at, float W, f
             lines.push_back("Single shot: a round is hand-fed after every shot");
         }
         if (w.suppressed) lines.push_back("Suppressed: quiet, little flash");
+        lines.push_back(fmt("%.1f kg   %.0f cm   %.0f dB", w.mass, w.length * 100.0f, w.loudness));
+        {
+            std::string a;
+            for (int s = 0; s < kAttachSlots; ++s)
+                if (it.att[s] >= 0) a += (a.empty() ? "" : ", ") + attachmentDefs()[it.att[s]].shortName;
+            if (!a.empty()) lines.push_back("Fitted: " + a);
+        }
+        lines.push_back("Right-click > Modify to fit attachments");
         break;
     }
+    case ItemCat::Attachment: {
+        const AttachmentDef& a = attachmentDefs()[d.attach];
+        lines.push_back(fmt("%s, %s   %.2f kg", attachSlotName(a.slot), attachSpecialName(a.special), a.mass));
+        if (a.slot == AS_Muzzle) lines.push_back(std::string("Thread: ") + threadName(a.mount) + (a.length > 0.0f ? fmt("   +%.0f cm", a.length * 100.0f) : ""));
+        if (a.slot == AS_Stock) lines.push_back(std::string("Mount: ") + stockMountName(a.mount));
+        std::string fx;
+        if (a.loudnessDb != 0.0f) fx += fmt("%+.0f dB  ", a.loudnessDb);
+        if (a.riseMul != 1.0f) fx += fmt("rise %+.0f%%  ", (a.riseMul - 1.0f) * 100.0f);
+        if (a.backMul != 1.0f) fx += fmt("kick %+.0f%%  ", (a.backMul - 1.0f) * 100.0f);
+        if (a.yawMul != 1.0f) fx += fmt("side %+.0f%%  ", (a.yawMul - 1.0f) * 100.0f);
+        if (a.swayMul != 1.0f) fx += fmt("sway %+.0f%%  ", (a.swayMul - 1.0f) * 100.0f);
+        if (a.adsMul != 1.0f) fx += fmt("aim time %+.0f%%  ", (a.adsMul - 1.0f) * 100.0f);
+        if (a.flashMul != 1.0f) fx += fmt("flash %+.0f%%  ", (a.flashMul - 1.0f) * 100.0f);
+        if (a.spreadMul != 1.0f) fx += fmt("spread %+.0f%%", (a.spreadMul - 1.0f) * 100.0f);
+        if (!fx.empty()) lines.push_back(fx);
+        lines.push_back("Drag onto a weapon (or its Modify panel) to fit");
+        break;
+    }
+    case ItemCat::Armor: case ItemCat::Helmet:
+        lines.push_back(fmt("Class %d   condition %.0f / %.0f   %.1f kg", d.armorClass, it.condition, d.durability, d.mass));
+        lines.push_back(std::string("Covers: ") + ((d.coverage & AC_Head) ? "head (not the face) " : "") + ((d.coverage & AC_Thorax) ? "chest " : "") +
+                        ((d.coverage & AC_Stomach) ? "stomach" : ""));
+        break;
     case ItemCat::Magazine:
         lines.push_back(fmt("%d / %d rounds", int(it.rounds.size()), d.capacity));
         if (!it.rounds.empty()) lines.push_back("Top round: " + ammoDefs()[it.rounds.back()].name);
@@ -268,7 +309,10 @@ void InventoryUi::drawTooltip(Hud& hud, const Item& it, glm::vec2 at, float W, f
         lines.push_back(fmt("Use time %.1f s", d.useTime));
         break;
     }
-    case ItemCat::Optic: lines.push_back("Drag onto a weapon to mount"); break;
+    case ItemCat::Optic:
+        lines.push_back(std::string("Needs a ") + (opticDefs()[d.optic].mount <= 1 ? "pistol plate or any rail" : opticDefs()[d.optic].mount == 2 ? "short top rail" : "long top rail"));
+        lines.push_back("Drag onto a weapon to mount");
+        break;
     case ItemCat::Rig:
     case ItemCat::Backpack: lines.push_back(fmt("%d x %d", d.gridW, d.gridH)); break;
     }
@@ -383,15 +427,34 @@ bool InventoryUi::drop(Context& ctx, const glm::vec2& mouse) {
             else m_drag = Drag{};
             return true;
         }
+        if (d.cat == ItemCat::Attachment && td.cat == ItemCat::Weapon) {
+            ItemPtr removed;
+            std::string why;
+            if (!fitAttachment(t, m_drag.item, removed, why)) {
+                say(why);
+                return false;
+            }
+            m_drag = Drag{};
+            if (removed && !ctx.player->equip.stow(removed) && ctx.grid) ctx.grid->autoPlace(removed);
+            if (removed && ctx.profile && !ctx.inRaid) ctx.profile->addToStash(std::move(removed));
+            if (removed && ctx.sim && ctx.inRaid) ctx.sim->dropFromCharacter(*ctx.player, std::move(removed));
+            return true;
+        }
         if (d.cat == ItemCat::Optic && td.cat == ItemCat::Weapon) {
             const WeaponDef& w = weaponDefs()[td.weapon];
-            if (d.optic > w.maxOptic) {
+            if (!opticFits(w, d.optic)) {
                 say("That optic doesn't mount on this weapon");
                 return false;
             }
             int old = t.optic;
             t.optic = d.optic;
             t.magnification = opticDefs()[d.optic].minMag;
+            t.altSight = false;
+            // A magnifier only works behind a red dot.
+            if (t.att[AS_Magnifier] >= 0 && opticDefs()[d.optic].type != OpticType::RedDot) {
+                ItemPtr mg = detachAttachment(t, AS_Magnifier);
+                if (mg && !ctx.player->equip.stow(mg) && ctx.grid) ctx.grid->autoPlace(mg);
+            }
             m_drag = Drag{};
             if (old > 0) {
                 ItemPtr o = makeItem(opticItemDef(old));
@@ -403,6 +466,28 @@ bool InventoryUi::drop(Context& ctx, const glm::vec2& mouse) {
     }
     for (const Target& t : m_targets) {
         if (!t.rect.contains(mouse)) continue;
+        if (t.type == Target::ModT) {
+            Item* w = findAnywhere(ctx, m_modUid);
+            if (!w || d.cat != ItemCat::Attachment) {
+                say(d.cat == ItemCat::Optic ? "Drop optics on the weapon itself" : "Only attachments go there");
+                return false;
+            }
+            if (attachmentDefs()[d.attach].slot != t.slot) {
+                say(std::string("That goes on the ") + attachSlotName(attachmentDefs()[d.attach].slot));
+                return false;
+            }
+            ItemPtr removed;
+            std::string why;
+            if (!fitAttachment(*w, m_drag.item, removed, why)) {
+                say(why);
+                return false;
+            }
+            m_drag = Drag{};
+            if (removed && !ctx.player->equip.stow(removed) && ctx.grid) ctx.grid->autoPlace(removed);
+            if (removed && ctx.profile && !ctx.inRaid) ctx.profile->addToStash(std::move(removed));
+            if (removed && ctx.sim && ctx.inRaid) ctx.sim->dropFromCharacter(*ctx.player, std::move(removed));
+            return true;
+        }
         if (t.type == Target::SellT) {
             if (!ctx.profile) return false;
             int price = store::sellPrice(it);
@@ -487,8 +572,8 @@ bool InventoryUi::quickMove(Context& ctx, const ItemHit& h) {
                     ok = true;
                     break;
                 }
-        } else if (c == ItemCat::Rig || c == ItemCat::Backpack) {
-            int s = c == ItemCat::Rig ? ES_Rig : ES_Backpack;
+        } else if (c == ItemCat::Rig || c == ItemCat::Backpack || c == ItemCat::Armor || c == ItemCat::Helmet) {
+            int s = c == ItemCat::Rig ? ES_Rig : c == ItemCat::Backpack ? ES_Backpack : c == ItemCat::Armor ? ES_Armor : ES_Helmet;
             if (!eq.slots[s]) {
                 eq.slots[s] = std::move(m_drag.item);
                 ok = true;
@@ -523,6 +608,8 @@ void InventoryUi::openMenu(const ItemHit& h, const glm::vec2& at, Context& ctx) 
     case ItemCat::Weapon:
         if (loadedRounds(*h.item) > 0 || h.item->mag) m_menu.options.push_back("Unload");
         if (h.item->optic > 0) m_menu.options.push_back("Remove optic");
+        m_menu.options.push_back("Modify");
+        if (h.item->weaponDef().foldable) m_menu.options.push_back(h.item->folded ? "Unfold stock" : "Fold stock");
         break;
     default: break;
     }
@@ -591,7 +678,13 @@ void InventoryUi::runMenu(Context& ctx, const std::string& opt) {
         int o = it->optic;
         it->optic = 0;
         it->magnification = 1.0f;
+        it->altSight = false;
         stowNear(makeItem(opticItemDef(o)));
+        if (it->att[AS_Magnifier] >= 0) stowNear(detachAttachment(*it, AS_Magnifier));
+    } else if (opt == "Modify") {
+        m_modUid = it->uid;
+    } else if (opt == "Fold stock" || opt == "Unfold stock") {
+        it->folded = opt == "Fold stock";
     } else if (opt == "Take" || opt == "Move across") {
         for (const ItemHit& h : m_items)
             if (h.item == it) {
@@ -620,7 +713,11 @@ bool InventoryUi::update(const UiInput& in, Context& ctx, Hud& hud, float W, flo
 
     drawEquipment(hud, ctx.player->equip, 20 * m_s, top + 10 * m_s, true, false);
     float healthX = 20 * m_s + 5 * m_cell + 30 * m_s + 6 * m_cell + 40 * m_s;
-    if (ctx.panel == Panel::Store) {
+    if (m_modUid && !findAnywhere(ctx, m_modUid)) m_modUid = 0;
+    if (m_modUid) {
+        float px0 = W - 10 * m_cell - 40 * m_s;
+        drawMods(hud, ctx, in, healthX - 10 * m_s, top + 4 * m_s, px0 - healthX - 20 * m_s, H - top - 60 * m_s);
+    } else if (ctx.panel == Panel::Store) {
         float px0 = W - 10 * m_cell - 40 * m_s;
         drawStore(hud, ctx, in, healthX - 10 * m_s, top + 4 * m_s, px0 - healthX - 20 * m_s, H - top - 60 * m_s);
     } else {

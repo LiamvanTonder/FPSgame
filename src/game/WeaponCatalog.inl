@@ -830,13 +830,18 @@ std::vector<WeaponDef> buildCatalogue() {
         v.push_back(w);
     }
 #include "game/WeaponCatalog2.inl"
+#include "game/WeaponCatalog3.inl"
     return v;
 }
 
 } // namespace
 
 const std::vector<WeaponDef>& weaponDefs() {
-    static const std::vector<WeaponDef> defs = buildCatalogue();
+    static const std::vector<WeaponDef> defs = [] {
+        std::vector<WeaponDef> v = buildCatalogue();
+        for (WeaponDef& w : v) deriveMounts(w);
+        return v;
+    }();
     return defs;
 }
 

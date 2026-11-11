@@ -28,7 +28,8 @@ struct HitOutcome {
 class Health {
 public:
     void reset();
-    HitOutcome applyHit(int bodyPart, float energyJ, const AmmoDef& ammo, int shooter, std::mt19937& rng);
+    // blunt: the bullet was stopped by armour; only the impact gets through (no wound channel to bleed).
+    HitOutcome applyHit(int bodyPart, float energyJ, const AmmoDef& ammo, int shooter, std::mt19937& rng, bool blunt = false);
     // Fall damage to the legs.
     void applyFall(float impactSpeed, std::mt19937& rng);
     void update(float dt);

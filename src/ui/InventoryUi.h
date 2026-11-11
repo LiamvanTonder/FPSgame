@@ -61,7 +61,7 @@ private:
         bool mine; // part of the player's own gear
     };
     struct Target {
-        enum Type { GridT, SlotT, ZoneT, SellT } type;
+        enum Type { GridT, SlotT, ZoneT, SellT, ModT } type;
         Rect rect;
         Grid* grid = nullptr;
         float cell = 0.0f;
@@ -96,6 +96,12 @@ private:
     void drawEquipment(Hud& hud, Equipment& eq, float x, float y, bool mine, bool compact);
     void drawStore(Hud& hud, Context& ctx, const UiInput& in, float x, float y, float w, float h);
     bool sellItem(Context& ctx, uint32_t uid);
+    // Weapon modding panel (InventoryMods.cpp)
+    void drawMods(Hud& hud, Context& ctx, const UiInput& in, float x, float y, float w, float h);
+    // Fits an attachment item onto a weapon (slot -1: its own slot). The item is consumed on success;
+    // whatever was in the slot comes back in 'removed'.
+    bool fitAttachment(Item& weapon, ItemPtr& att, ItemPtr& removed, std::string& why);
+    ItemPtr detachAttachment(Item& weapon, int slot);
 
     void beginDrag(const ItemHit& h, const glm::vec2& mouse);
     bool drop(Context& ctx, const glm::vec2& mouse);
@@ -119,5 +125,6 @@ private:
     int m_filterWeapon = -1;
     float m_storeScroll = 0.0f;
     const Item* m_hover = nullptr;
+    uint32_t m_modUid = 0; // weapon open in the modding panel
     glm::vec2 m_mouse{0.0f};
 };

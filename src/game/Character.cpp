@@ -272,6 +272,7 @@ void Character::updateMovement(const CharacterInput& in, float dt, const World& 
                 m_action != Action::Med && m_action != Action::LoadMag;
     float speed = sprinting ? params.sprintSpeed : crouching ? params.crouchSpeed : aiming ? params.aimWalkSpeed : params.walkSpeed;
     speed *= health.moveSpeedScale();
+    speed *= 1.0f - 0.012f * carriedArmorMass(); // plates are heavy
     if (stagger > 0.0f) speed *= 0.4f;
     if (m_action == Action::Med || m_action == Action::Search) speed = std::min(speed, params.aimWalkSpeed);
 
@@ -342,8 +343,8 @@ void Character::updateLean(float target, float dt, const World& world) {
 
 void Character::updateHeart(const CharacterInput&, float dt, bool holdingBreath, bool gasp) {
     float target = params.restingHeartRate;
-    if (grounded) target += std::min(horizontalSpeed() / params.walkSpeed, 1.0f) * 23.0f;
-    if (sprinting) target = 168.0f;
+    if (grounded) target += std::min(horizontalSpeed() / params.walkSpeed, 1.0f) * 23.0f * (1.0f + 0.03f * carriedArmorMass());
+    if (sprinting) target = 168.0f + 1.2f * carriedArmorMass();
     if (holdingBreath) target = std::max(target, heartRate + 6.0f);
     // Wounds and blood loss push the heart rate up.
     target += (1.0f - health.totalHp() / health.totalMax()) * 40.0f + health.pain() * 10.0f;
@@ -748,7 +749,30 @@ std::string Character::onHit(int part, const Impact& imp, SimContext& sc) {
         return who + ": body hit";
     }
     int ammoIdx = imp.ammo >= 0 ? imp.ammo : defaultAmmo(Cal_556);
-    HitOutcome o = health.applyHit(part, energy, ammoDefs()[ammoIdx], imp.shooter, rng);
+    const AmmoDef& ammo = ammoDefs()[ammoIdx];
+    // Armour: the plate or helmet either stops the bullet (blunt trauma only) or is defeated
+    // and takes some of its energy. Either way it is damaged.
+    bool blunt = false;
+    std::string armorNote;
+    int as = armorSlotFor(part, imp.point);
+    if (as >= 0) {
+        Item& a = *equip.slots[as];
+        const ItemDef& ad = a.d();
+        std::uniform_real_distribution<float> jitter(-0.05f, 0.05f);
+        bool stopped = armorStopsBullet(ad, a.condition, ammo, energy, jitter(rng));
+        a.condition = std::max(0.0f, a.condition - energy / 1000.0f * (stopped ? 9.0f : 5.0f) * (0.6f + ammo.penetration));
+        if (stopped) {
+            energy *= 0.12f;
+            blunt = true;
+            ++armorStops;
+            armorNote = ad.cat == ItemCat::Helmet ? " (helmet stopped it)" : " (armour stopped it)";
+        } else {
+            energy *= 1.0f - 0.15f * float(ad.armorClass);
+            ++armorPenetrations;
+            armorNote = ad.cat == ItemCat::Helmet ? " (through the helmet)" : " (through the armour)";
+        }
+    }
+    HitOutcome o = health.applyHit(part, energy, ammo, imp.shooter, rng, blunt);
     float k = energy / 1000.0f;
     if (part == BP_Chest || part == BP_Pelvis) stagger = std::max(stagger, 0.5f);
     else stagger = std::max(stagger, 0.2f);
@@ -774,7 +798,40 @@ std::string Character::onHit(int part, const Impact& imp, SimContext& sc) {
         sc.drops.push_back(std::move(d));
     }
     if (health.dead()) kill(part == BP_Head ? "head shot" : "gunshot wound", imp.shooter, imp.point, impulse * (part == BP_Head ? 6.0f : 4.0f), sc);
-    return who + ": " + bodyPartName(part) + " - " + o.describe(part);
+    return who + ": " + bodyPartName(part) + " - " + o.describe(part) + armorNote;
+}
+
+bool armorStopsBullet(const ItemDef& armor, float condition, const AmmoDef& ammo, float energyJ, float jitter) {
+    float cond = std::clamp(condition / std::max(1.0f, armor.durability), 0.0f, 1.0f);
+    const float threshold[] = {0.0f, 0.18f, 0.38f, 0.60f, 0.85f};
+    float t = threshold[std::clamp(armor.armorClass, 0, 4)] * (0.35f + 0.65f * cond);
+    float power = ammo.penetration * 0.7f + 0.3f * std::min(1.0f, energyJ / 3500.0f);
+    return power + jitter < t;
+}
+
+int Character::armorSlotFor(int part, const glm::vec3& point) const {
+    int zone = zoneOfPart(part);
+    uint8_t bit = zone == Z_Head ? AC_Head : zone == Z_Thorax ? AC_Thorax : zone == Z_Stomach ? AC_Stomach : 0;
+    if (!bit) return -1;
+    int slot = zone == Z_Head ? ES_Helmet : ES_Armor;
+    const ItemPtr& a = equip.slots[slot];
+    if (!a || !(a->d().coverage & bit) || a->condition <= 0.0f) return -1;
+    if (zone == Z_Head) {
+        // The face is open: hits low on the front of the head miss the helmet.
+        glm::vec3 rel = point - joints[J_Head];
+        glm::vec3 fwd = flatForward();
+        glm::vec2 h(rel.x, rel.z);
+        float front = glm::length(h) > 1e-4f ? glm::dot(glm::normalize(h), glm::vec2(fwd.x, fwd.z)) : 0.0f;
+        if (rel.y < 0.015f && front > 0.3f) return -1;
+    }
+    return slot;
+}
+
+float Character::carriedArmorMass() const {
+    float m = 0.0f;
+    for (int s : {ES_Armor, ES_Helmet})
+        if (equip.slots[s]) m += equip.slots[s]->d().mass;
+    return m;
 }
 
 void Character::kill(const std::string& cause, int killerId, const glm::vec3& point, const glm::vec3& impulse, SimContext& sc) {
@@ -830,10 +887,30 @@ void Character::draw(Renderer& r, float alpha, bool skipBody) const {
         const glm::vec3 colors[kBodyPartCount] = {kSkin, vest, trousers, jacket, jacket, jacket, jacket,
                                                   trousers, trousers, trousers, trousers};
         for (int i = 0; i < kBodyPartCount; ++i) r.drawBox(boxes[i], colors[i]);
-        OBB helmet = boxes[BP_Head];
-        helmet.center += helmet.rotation[1] * 0.06f;
-        helmet.half = glm::vec3(0.115f, 0.075f, 0.13f);
-        r.drawBox(helmet, jacket * 0.7f);
+        if (equip.slots[ES_Helmet]) {
+            // Helmet, shaded by class (heavier ones sit lower and come down the sides).
+            const ItemDef& hd = equip.slots[ES_Helmet]->d();
+            OBB helmet = boxes[BP_Head];
+            helmet.center += helmet.rotation[1] * (0.065f - 0.008f * hd.armorClass);
+            helmet.half = glm::vec3(0.118f + 0.004f * hd.armorClass, 0.072f + 0.01f * hd.armorClass, 0.132f);
+            r.drawBox(helmet, hd.color);
+        } else {
+            OBB cap = boxes[BP_Head];
+            cap.center += cap.rotation[1] * 0.085f;
+            cap.half = glm::vec3(0.108f, 0.035f, 0.12f);
+            r.drawBox(cap, jacket * 0.7f);
+        }
+        if (equip.slots[ES_Armor]) {
+            // Plate carrier over the jacket: thicker with the class.
+            const ItemDef& ad = equip.slots[ES_Armor]->d();
+            OBB carrier = boxes[BP_Chest];
+            carrier.half += glm::vec3(0.02f, -0.02f, 0.012f + 0.006f * ad.armorClass);
+            if (ad.coverage & AC_Stomach) {
+                carrier.center -= carrier.rotation[1] * 0.04f;
+                carrier.half.y += 0.04f;
+            }
+            r.drawBox(carrier, ad.color);
+        }
         for (int h : {J_LHand, J_RHand}) r.drawBox(OBB{j[h], glm::vec3(0.045f), boxes[BP_ForearmL].rotation}, kSkin);
         for (int f : {J_LFoot, J_RFoot}) {
             OBB boot = boxes[f == J_LFoot ? BP_ShinL : BP_ShinR];

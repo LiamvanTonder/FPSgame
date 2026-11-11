@@ -1,5 +1,8 @@
 #include "game/WeaponDefs.h"
 
+#include "items/ItemDefs.h"
+
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -362,13 +365,146 @@ const std::vector<OpticDef>& opticDefs() {
     //                 name               type                min    max  reticle            len    ocular  obj     relief axis
     static const std::vector<OpticDef> defs = {
         {"Iron sights",    OpticType::Iron,      1.0f,  1.0f,  Reticle::None,     0.0f,  0.0f,   0.0f,   0.0f,  0.0f},
-        {"Red dot 1x",     OpticType::RedDot,    1.0f,  1.0f,  Reticle::None,     0.05f, 0.012f, 0.0f,   0.0f,  0.028f},
-        {"Prism 2x",       OpticType::Magnified, 2.0f,  2.0f,  Reticle::CrossDot, 0.14f, 0.018f, 0.016f, 0.07f, 0.034f},
-        {"Scope 4x",       OpticType::Magnified, 4.0f,  4.0f,  Reticle::Duplex,   0.26f, 0.020f, 0.020f, 0.08f, 0.036f},
-        {"Scope 8x",       OpticType::Magnified, 8.0f,  8.0f,  Reticle::MilDot,   0.32f, 0.021f, 0.025f, 0.085f, 0.040f},
-        {"Scope 3-12x",    OpticType::Magnified, 3.0f,  12.0f, Reticle::MilDot,   0.36f, 0.021f, 0.028f, 0.09f, 0.042f},
+        {"Red dot 1x",     OpticType::RedDot,    1.0f,  1.0f,  Reticle::None,     0.05f, 0.012f, 0.0f,   0.0f,  0.028f, 1},
+        {"Prism 2x",       OpticType::Magnified, 2.0f,  2.0f,  Reticle::CrossDot, 0.14f, 0.018f, 0.016f, 0.07f, 0.034f, 2},
+        {"Scope 4x",       OpticType::Magnified, 4.0f,  4.0f,  Reticle::Duplex,   0.26f, 0.020f, 0.020f, 0.08f, 0.036f, 3},
+        {"Scope 8x",       OpticType::Magnified, 8.0f,  8.0f,  Reticle::MilDot,   0.32f, 0.021f, 0.025f, 0.085f, 0.040f, 3},
+        {"Scope 3-12x",    OpticType::Magnified, 3.0f,  12.0f, Reticle::MilDot,   0.36f, 0.021f, 0.028f, 0.09f, 0.042f, 3},
+        {"Holographic 1x", OpticType::RedDot,    1.0f,  1.0f,  Reticle::None,     0.09f, 0.018f, 0.0f,   0.0f,  0.032f, 2},
+        {"Prism 3x",       OpticType::Magnified, 3.0f,  3.0f,  Reticle::CrossDot, 0.15f, 0.019f, 0.018f, 0.07f, 0.035f, 2},
+        {"LPVO 1-6x",      OpticType::Magnified, 1.0f,  6.0f,  Reticle::Duplex,   0.27f, 0.020f, 0.021f, 0.09f, 0.038f, 2},
+        {"Compact 4x",     OpticType::Magnified, 4.0f,  4.0f,  Reticle::CrossDot, 0.16f, 0.018f, 0.019f, 0.04f, 0.036f, 2},
+        // Sight pictures without items of their own
+        {"Offset dot",     OpticType::RedDot,    1.0f,  1.0f,  Reticle::None,     0.04f, 0.010f, 0.0f,   0.0f,  0.030f, 2, false},
+        {"Red dot + 3x",   OpticType::Magnified, 3.0f,  3.0f,  Reticle::CrossDot, 0.20f, 0.016f, 0.014f, 0.07f, 0.028f, 2, false},
+        {"Holo + 3x",      OpticType::Magnified, 3.0f,  3.0f,  Reticle::CrossDot, 0.20f, 0.016f, 0.016f, 0.07f, 0.032f, 2, false},
     };
     return defs;
+}
+
+bool opticFits(const WeaponDef& w, int optic) {
+    const auto& o = opticDefs();
+    if (optic <= 0) return true;
+    if (optic >= int(o.size()) || !o[optic].item) return false;
+    int mount = w.opticMount >= 0 ? w.opticMount : (w.maxOptic <= 0 ? 0 : w.maxOptic <= 1 ? 1 : w.maxOptic <= 3 ? 2 : 3);
+    return o[optic].mount <= mount;
+}
+
+const char* threadName(int t) {
+    static const char* n[kThreadCount] = {"none", "9mm pistol thread", ".45 thread", "5.7 thread", "5.56 / .300 thread",
+                                          "5.45 thread", "7.62x39 thread", ".308 thread", ".338 thread", "12ga choke"};
+    return t >= 0 && t < kThreadCount ? n[t] : "?";
+}
+
+const char* stockMountName(int m) {
+    static const char* n[kStockMountCount] = {"none", "buffer tube", "folding hinge", "precision chassis", "pistol stock lug"};
+    return m >= 0 && m < kStockMountCount ? n[m] : "?";
+}
+
+void deriveMounts(WeaponDef& w) {
+    if (w.mountsDerived) return;
+    w.mountsDerived = true;
+    const bool pistol = w.cls == WeaponClass::Pistol;
+    const bool revolver = w.reload == ReloadType::Tube && !w.chamberSeparate;
+    const bool bullpup = !pistol && w.rightHand.z < -0.40f;
+
+    // Mass: by class, stretched by length (catalogue may set it).
+    if (w.mass <= 0.0f) {
+        float base = 3.3f;
+        switch (w.cls) {
+        case WeaponClass::Pistol: base = 0.75f + 2.0f * std::max(0.0f, w.length - 0.15f); break;
+        case WeaponClass::Smg: base = 2.6f; break;
+        case WeaponClass::Shotgun: base = 3.3f; break;
+        case WeaponClass::Rifle: base = 3.3f; break;
+        case WeaponClass::Marksman: base = 4.4f; break;
+        case WeaponClass::Sniper: base = 5.6f; break;
+        case WeaponClass::Lmg: base = 7.2f; break;
+        }
+        if (!pistol) base *= std::clamp(w.length / 0.90f, 0.7f, 1.5f);
+        if (w.caliber == Cal_50BMG) base = 13.5f;
+        w.mass = base;
+    }
+
+    // Muzzle thread from the calibre.
+    if (w.thread < 0) {
+        int t = Th_None;
+        switch (w.caliber) {
+        case Cal_9x19: case Cal_46x30: t = Th_P9; break;
+        case Cal_45ACP: case Cal_10mm: t = Th_P45; break;
+        case Cal_57x28: t = Th_P57; break;
+        case Cal_556: case Cal_300BLK: t = Th_R556; break;
+        case Cal_545: t = Th_R545; break;
+        case Cal_762x39: t = Th_R762; break;
+        case Cal_762x51: case Cal_65: case Cal_762x54R: t = Th_R308; break;
+        case Cal_338: t = Th_R338; break;
+        case Cal_12ga: t = Th_S12; break;
+        default: t = Th_None; break;
+        }
+        if (w.suppressed || revolver) t = Th_None; // integral can / revolver gap / twin barrels
+        w.thread = t;
+    }
+    int ammo = -1;
+    {
+        const auto& a = ammoDefs();
+        for (int i = 0; i < int(a.size()); ++i)
+            if (a[i].caliber == w.caliber) { ammo = i; break; }
+        w.bulletDiameter = ammo >= 0 ? a[ammo].diameter : w.projectile.diameter;
+    }
+
+    if (w.opticMount < 0) w.opticMount = w.maxOptic <= 0 ? 0 : w.maxOptic <= 1 ? 1 : w.maxOptic <= 3 ? 2 : 3;
+
+    // Tag the built-in stock, grip and crown so fitted parts can replace them.
+    float stockFront = 0.0f;
+    bool hasStock = false;
+    int gripPart = -1;
+    float gripBest = 1e9f;
+    for (int i = 0; i < int(w.parts.size()); ++i) {
+        Part& p = w.parts[i];
+        if (p.flags & Part::Hand) continue;
+        if (!pistol && !bullpup && p.center.z > w.rightHand.z + 0.04f && !(p.flags & Part::RearSight)) {
+            p.flags |= Part::Stock;
+            hasStock = true;
+            stockFront = std::min(stockFront, p.center.z - p.size.z * 0.5f);
+        }
+        if (p.cylinder && p.size.z < 0.08f && std::abs(p.center.z - w.muzzle.z) < 0.05f) p.flags |= Part::MuzzleCap;
+        float dg = glm::length(p.center - w.rightHand);
+        if (p.tiltX != 0.0f && !(p.flags & Part::Stock) && dg < 0.06f && dg < gripBest) {
+            gripBest = dg;
+            gripPart = i;
+        }
+    }
+    if (gripPart >= 0) w.parts[gripPart].flags |= Part::Grip;
+    w.gripMount = gripPart >= 0 && !pistol;
+    w.gripPoint = gripPart >= 0 ? w.parts[gripPart].center : w.rightHand;
+    w.stockFrontZ = hasStock ? stockFront : -0.25f;
+
+    if (w.stockMount < 0) {
+        int m = SM_None;
+        if (pistol) m = w.canAuto ? SM_PistolAdapter : SM_None;
+        else if (bullpup || !hasStock) m = SM_None;
+        else if (w.cls == WeaponClass::Sniper || w.cls == WeaponClass::Marksman) m = SM_Precision;
+        else if (w.caliber == Cal_545 || w.caliber == Cal_762x39 || w.caliber == Cal_762x54R || w.cls == WeaponClass::Smg ||
+                 w.cls == WeaponClass::Shotgun)
+            m = SM_Folder;
+        else m = SM_Buffer;
+        if (w.caliber == Cal_50BMG) m = SM_None;
+        w.stockMount = m;
+        w.foldingStock = m == SM_Folder;
+    }
+
+    // Rails
+    bool twin = w.cls == WeaponClass::Shotgun && revolver;
+    if (pistol) {
+        w.underRail = !revolver;
+        w.sideRail = false;
+        w.underPoint = {0.0f, -0.020f, w.muzzle.z * 0.62f};
+    } else {
+        w.underRail = !w.leftHandOnAction && !twin;
+        w.sideRail = !twin;
+        w.underPoint = {0.0f, w.leftHand.y - 0.040f, std::max(w.leftHand.z - 0.05f, w.muzzle.z + 0.10f)};
+        w.sidePoint = {0.034f, w.leftHand.y + 0.030f, std::max(w.leftHand.z - 0.10f, w.muzzle.z + 0.06f)};
+    }
+    w.offsetMount = !pistol && w.opticMount >= 2;
 }
 
 void buildOpticParts(const WeaponDef& w, const OpticDef& o, std::vector<Part>& out) {

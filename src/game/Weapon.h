@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "game/ArmModel.h"
 #include "game/Ballistics.h"
@@ -24,6 +24,8 @@ struct WeaponInput {
     int selectWeapon = -1;  // hand slot 0 / 1
     float zoomSteps = 0.0f; // mouse wheel notches
     int zeroSteps = 0;      // elevation turret clicks (+/- 25 m)
+    bool toggleLight = false; // weapon light / laser on-off
+    bool toggleSight = false; // offset sight / flip magnifier
 };
 
 struct WeaponContext {
@@ -45,6 +47,7 @@ struct WeaponContext {
     bool supportArmGone = false;
     bool armsGone = false;
     bool busy = false;         // treating wounds, searching: weapon lowered
+    bool prone = false;
 };
 
 // Things the effects and sound systems react to.
@@ -58,6 +61,7 @@ struct WeaponEvent {
     int owner = 0;
     int weapon = 0;      // weaponDefs() index
     bool suppressed = false;
+    float loudness = 160.0f; // dB SPL at 1 m (as configured)
 };
 
 // An item that left the weapon (dumped magazine).
@@ -119,6 +123,14 @@ public:
     float adsBlend() const { return m_adsBlend; }
     glm::vec2 drift() const { return m_drift; }
     const char* fireModeName() const;
+    // Attachments in use
+    bool lightOn() const;          // weapon light shining
+    bool laserOn() const;          // visible laser on
+    glm::vec3 lightEmitter() const { return toWorld(def().lightPoint); }
+    glm::vec3 pointing() const { return arm.orientation * glm::vec3(0, 0, -1); }
+    bool bipodDeployed() const { return m_bipod; }
+    glm::vec3 beamEnd() const { return m_beamEnd; }
+    bool usingAltSight() const { return m_altBlend > 0.5f; }
     // Status note for the HUD ("NO MAGAZINE", ...), empty if none.
     const char* note() const { return m_noteTimer > 0.0f ? m_note : ""; }
     // True once after held breath ran out (the body then gasps; heart rate spikes).
@@ -147,6 +159,8 @@ private:
 
     glm::vec3 toWorld(const glm::vec3& local) const { return arm.pivot + arm.orientation * local; }
     glm::vec3 sightEyeLocal() const; // eye position (weapon-local) when aimed
+    int activeOptic() const;         // opticDefs index of the sight picture in use
+    void updateBipod(const WeaponContext& ctx, const World& world, float dt);
     float sightHeight() const;
     void rezero();
     void computeTargetPose(const WeaponContext& ctx, const World& world, float dt, glm::vec3& anchor, glm::quat& target);
@@ -202,6 +216,12 @@ private:
     float m_armShake = 0.0f;
     glm::vec2 m_drift{0.0f};     // slow wander of the intended aim (yaw, pitch rad)
     float m_heartPhase = 0.0f;
+    float m_altBlend = 0.0f;     // offset sight roll-over (0 main sight .. 1 offset)
+    bool m_bipod = false;
+    glm::vec3 m_bipodAt{0.0f};
+    float m_bipodYaw = 0.0f, m_bipodTimer = 0.0f;
+    glm::vec3 m_beamEnd{0.0f};   // where the light / laser axis meets the world
+    bool m_beamHit = false;
     float m_yaw = 0.0f;          // body yaw last tick, for drawing arms
     const char* m_note = "";
     float m_noteTimer = 0.0f;

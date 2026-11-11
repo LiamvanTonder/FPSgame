@@ -11,6 +11,15 @@ uniform vec3 uCamPos;
 uniform vec3 uSkyColor;
 uniform sampler2DShadow uShadowMap;
 
+// Weapon lights: narrow cones with a soft edge.
+struct Spot {
+    vec3 position;
+    vec3 direction;
+    float range;
+};
+uniform Spot uSpots[8];
+uniform int uSpotCount;
+
 out vec4 FragColor;
 
 vec3 toLinear(vec3 c) { return pow(c, vec3(2.2)); }
@@ -134,6 +143,18 @@ void main() {
 
     float spec = pow(max(dot(n, h), 0.0), 48.0) * 0.15 * ndl;
     vec3 color = albedo * (ambient + sun * ndl * sh) + sun * spec * sh;
+
+    for (int i = 0; i < uSpotCount; ++i) {
+        vec3 toFrag = vWorldPos - uSpots[i].position;
+        float d = length(toFrag);
+        if (d > uSpots[i].range || d < 1e-3) continue;
+        vec3 dirL = toFrag / d;
+        float c = dot(dirL, uSpots[i].direction);
+        float cone = smoothstep(0.955, 0.992, c) + 0.25 * smoothstep(0.90, 0.955, c);
+        float atten = 1.0 / (1.0 + 0.06 * d * d) * (1.0 - smoothstep(uSpots[i].range * 0.75, uSpots[i].range, d));
+        float facing = max(dot(n, -dirL), 0.0);
+        color += albedo * vec3(1.0, 0.96, 0.88) * 9.0 * cone * atten * facing;
+    }
 
     if (uPattern == 5) {
         // Smoke/dust: mostly ambient, softly sun-lit regardless of facing

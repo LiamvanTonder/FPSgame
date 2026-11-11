@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "audio/Audio.h"
 #include "core/Input.h"
@@ -89,6 +89,7 @@ private:
     std::vector<std::string> m_resultLines;
     Equipment m_pendingLoadout;
     Equipment m_home;        // the real loadout, kept safe during a pistol-only raid
+    bool m_inLootZone = false;
     bool m_pistolRun = false;
 
     float m_heartPhase = 0.0f, m_breathTimer = 0.0f;
